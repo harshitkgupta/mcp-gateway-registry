@@ -4,11 +4,12 @@ import urllib.parse
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Cookie, Request, status
+from fastapi import APIRouter, Cookie, Depends, Form, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from prometheus_client import Counter
 
+from .csrf import verify_csrf_token
 from ..core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -294,8 +295,9 @@ async def logout_get(
 async def logout_post(
     request: Request,
     session: Annotated[str | None, Cookie(alias=settings.session_cookie_name)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token)] = None,
 ):
-    """Handle logout via POST request (for forms)"""
+    """Handle logout via POST request (for forms with CSRF validation)"""
     return await logout_handler(request, session)
 
 

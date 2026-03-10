@@ -16,9 +16,21 @@ export interface DocFile {
 
 function _walkDirectory(dir: string, baseDir: string, files: string[] = []): string[] {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
+  const resolvedBase = path.resolve(baseDir);
 
   for (const entry of entries) {
+    // Validate entry name doesn't contain path traversal sequences
+    if (entry.name.includes('..') || entry.name.includes('/') || entry.name.includes('\\')) {
+      continue;
+    }
+
     const fullPath = path.join(dir, entry.name);
+
+    // Ensure resolved path is still within baseDir
+    const resolvedPath = path.resolve(fullPath);
+    if (!resolvedPath.startsWith(resolvedBase)) {
+      continue;
+    }
 
     if (entry.isDirectory()) {
       _walkDirectory(fullPath, baseDir, files);
@@ -64,14 +76,26 @@ export function getAllDocFiles(): string[] {
 
 
 export function readDocFile(filePath: string): DocFile | null {
+  // Reject path traversal sequences and absolute paths
+  if (filePath.includes('..') || path.isAbsolute(filePath)) {
+    throw new Error(`Invalid file path: ${filePath}`);
+  }
+
   const fullPath = path.join(DOCS_DIR, filePath);
 
-  if (!fs.existsSync(fullPath)) {
+  // Resolve paths and ensure result is within DOCS_DIR
+  const resolvedPath = path.resolve(fullPath);
+  const resolvedBase = path.resolve(DOCS_DIR);
+  if (!resolvedPath.startsWith(resolvedBase)) {
+    throw new Error(`Path traversal detected: ${filePath}`);
+  }
+
+  if (!fs.existsSync(resolvedPath)) {
     return null;
   }
 
   try {
-    const content = fs.readFileSync(fullPath, 'utf-8');
+    const content = fs.readFileSync(resolvedPath, 'utf-8');
     const name = path.basename(filePath);
 
     return {

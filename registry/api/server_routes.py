@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from ..audit import set_audit_action
+from ..auth.csrf import generate_csrf_token, verify_csrf_token
 from ..auth.dependencies import enhanced_auth, nginx_proxied_auth
 from ..auth.internal import validate_internal_auth
 from ..constants import VALID_AUTH_SCHEMES
@@ -251,6 +252,7 @@ async def read_root(
             "username": user_context["username"],
             "user_context": user_context,  # Pass full user context to template
             "can_perform_action": can_perform_action,  # Helper function for permission checks
+            "csrf_token": generate_csrf_token(session) if session else "",
         },
     )
 
@@ -399,6 +401,7 @@ async def toggle_service_route(
     service_path: str,
     enabled: Annotated[str | None, Form()] = None,
     user_context: Annotated[dict, Depends(enhanced_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token)] = None,
 ):
     """Toggle a service on/off (requires toggle_service UI permission)."""
     from ..auth.dependencies import user_has_ui_permission_for_service
@@ -1248,6 +1251,7 @@ async def edit_server_form(
                 detail="You do not have access to edit this server",
             )
 
+    session_cookie = request.cookies.get(settings.session_cookie_name, "")
     return templates.TemplateResponse(
         "edit_server.html",
         {
@@ -1255,6 +1259,7 @@ async def edit_server_form(
             "server": server_info,
             "username": user_context["username"],
             "user_context": user_context,
+            "csrf_token": generate_csrf_token(session_cookie) if session_cookie else "",
         },
     )
 
@@ -1276,6 +1281,7 @@ async def edit_server_submit(
     auth_scheme: Annotated[str, Form()] = "none",
     auth_credential: Annotated[str | None, Form()] = None,
     auth_header_name: Annotated[str | None, Form()] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token)] = None,
 ):
     """Handle server edit form submission (requires modify_service UI permission)."""
     from ..auth.dependencies import user_has_ui_permission_for_service

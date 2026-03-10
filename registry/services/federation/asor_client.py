@@ -64,7 +64,7 @@ class AsorFederationClient(BaseFederationClient):
         access_token_env = os.getenv("ASOR_ACCESS_TOKEN")
         if access_token_env:
             logger.info("Using pre-obtained ASOR access token from environment")
-            logger.debug(f"Token starts with: {access_token_env[:50]}...")
+            logger.debug(f"Token starts with: {access_token_env[:10]}...")
             self._access_token = access_token_env
             # Set a reasonable expiry (1 hour from now)
             self._token_expiry = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=1)
@@ -185,7 +185,7 @@ class AsorFederationClient(BaseFederationClient):
             logger.error("Failed to authenticate with Workday")
             return None
 
-        logger.debug(f"Using access token for API call: {access_token[:50]}...")
+        logger.debug("Using access token for API call")
 
         # Build headers - match working test script format
         headers = {
@@ -221,9 +221,8 @@ class AsorFederationClient(BaseFederationClient):
             logger.error("Failed to authenticate with Workday")
             return []
 
-        logger.info(f"ASOR DEBUG - URL: {url}")
-        logger.info(f"ASOR DEBUG - Token (first 50 chars): {access_token[:50]}...")
-        logger.info(f"ASOR DEBUG - Endpoint: {self.endpoint}")
+        logger.debug(f"ASOR DEBUG - URL: {url}")
+        logger.debug(f"ASOR DEBUG - Endpoint: {self.endpoint}")
 
         # Build headers - match working test script format
         headers = {
@@ -232,7 +231,7 @@ class AsorFederationClient(BaseFederationClient):
             "Authorization": f"Bearer {access_token}",
         }
 
-        logger.info(f"ASOR DEBUG - Headers: {headers}")
+        logger.debug("ASOR DEBUG - Headers prepared (Authorization redacted)")
 
         # Make request
         logger.info("Listing all agents from ASOR")

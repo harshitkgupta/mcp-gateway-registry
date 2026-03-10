@@ -2205,6 +2205,7 @@
                 {% endif %}
             </div>
             <form action="/logout" method="post" style="display: inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button type="submit" class="logout-button">Logout</button>
             </form>
         </div>
@@ -2353,6 +2354,7 @@
                                 {% if can_perform_action('toggle_service', service.display_name) %}
                                     {# Add ID to form if needed, but action URL is sufficient #}
                                     <form action="/toggle{{ service.path }}" method="post" class="toggle-form">
+                                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                                         <label class="switch">
                                             {# Change onchange to use data attributes instead #}
                                             <input type="checkbox" name="enabled" value="on"

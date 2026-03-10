@@ -262,11 +262,17 @@ def test_client_admin(
         patch("registry.utils.scopes_manager.update_server_scopes", new_callable=AsyncMock),
         patch("registry.api.server_routes.enhanced_auth", mock_enhanced_auth_func),
     ):
+        from registry.auth.csrf import verify_csrf_token
         from registry.main import app
+
+        # Override CSRF verification for tests
+        app.dependency_overrides[verify_csrf_token] = lambda: None
 
         # Create client with session cookie (uses the default cookie name mcp_gateway_session)
         client = TestClient(app, cookies={"mcp_gateway_session": "test-session"})
         yield client
+
+        app.dependency_overrides.pop(verify_csrf_token, None)
 
 
 @pytest.fixture
@@ -296,11 +302,17 @@ def test_client_regular(
         patch("registry.utils.scopes_manager.update_server_scopes", new_callable=AsyncMock),
         patch("registry.api.server_routes.enhanced_auth", mock_enhanced_auth_func),
     ):
+        from registry.auth.csrf import verify_csrf_token
         from registry.main import app
+
+        # Override CSRF verification for tests
+        app.dependency_overrides[verify_csrf_token] = lambda: None
 
         # Create client with session cookie (uses the default cookie name mcp_gateway_session)
         client = TestClient(app, cookies={"mcp_gateway_session": "test-session"})
         yield client
+
+        app.dependency_overrides.pop(verify_csrf_token, None)
 
 
 @pytest.fixture
