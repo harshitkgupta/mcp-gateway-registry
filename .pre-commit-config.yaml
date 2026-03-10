@@ -74,6 +74,16 @@ repos:
         name: Check for debugger statements
         description: Check for pdb and ipdb debugger statements
 
+  # Detect-secrets - Prevent secrets from being committed
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        name: Detect secrets
+        description: Prevent hardcoded secrets from being committed
+        args: ['--baseline', '.secrets.baseline']
+        exclude: ^(tests/|docs/|cli/examples/)
+
   # Bandit - Security vulnerability scanner
   - repo: https://github.com/PyCQA/bandit
     rev: '1.8.3'

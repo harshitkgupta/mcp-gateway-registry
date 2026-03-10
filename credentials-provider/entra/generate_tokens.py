@@ -156,7 +156,7 @@ def _save_token_file(
     token_json = {
         "identity_name": identity_name,
         "access_token": access_token,
-        "token_type": "Bearer",
+        "token_type": "Bearer",  # nosec B105 - OAuth2 standard token type per RFC 6750
         "expires_in": expires_in,
         "generated_at": generated_at,
         "expires_at": expires_at,

@@ -2,6 +2,16 @@
 
 This guide describes how to manage groups, users, and M2M (machine-to-machine) service accounts in the MCP Gateway Registry, and how to generate JWT tokens for authentication.
 
+> **SECURITY WARNING**
+>
+> The examples in this document use placeholder credentials for demonstration purposes only.
+> **NEVER use these example values in production.**
+>
+> Always generate unique, secure credentials and store them in:
+> - AWS Secrets Manager (production)
+> - Environment variables (development)
+> - `.env` files (local only, never commit)
+
 ## Table of Contents
 
 1. [Overview](#overview)

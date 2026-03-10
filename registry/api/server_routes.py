@@ -2145,7 +2145,7 @@ async def generate_user_token(
                         "refresh_token": token_data.get("refresh_token"),
                         "expires_in": token_data.get("expires_in"),
                         "refresh_expires_in": token_data.get("refresh_expires_in"),
-                        "token_type": token_data.get("token_type", "Bearer"),
+                        "token_type": token_data.get("token_type", "Bearer"),  # nosec B105 - OAuth2 standard token type per RFC 6750
                         "scope": token_data.get("scope", ""),
                     },
                     "keycloak_url": getattr(settings, "keycloak_url", None)

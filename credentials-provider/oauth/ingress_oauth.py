@@ -177,7 +177,7 @@ def _perform_keycloak_m2m_authentication(
                 "refresh_token"
             ),  # M2M typically doesn't have refresh tokens
             "expires_at": expires_at,
-            "token_type": token_data.get("token_type", "Bearer"),
+            "token_type": token_data.get("token_type", "Bearer"),  # nosec B105 - OAuth2 standard token type per RFC 6750
             "provider": "keycloak_m2m",
             "client_id": client_id,
             "keycloak_url": keycloak_url,
@@ -257,7 +257,7 @@ def _perform_entra_m2m_authentication(
                 "refresh_token"
             ),  # M2M typically doesn't have refresh tokens
             "expires_at": expires_at,
-            "token_type": token_data.get("token_type", "Bearer"),
+            "token_type": token_data.get("token_type", "Bearer"),  # nosec B105 - OAuth2 standard token type per RFC 6750
             "provider": "entra_m2m",
             "client_id": client_id,
             "tenant_id": tenant_id,
@@ -342,7 +342,7 @@ def _perform_m2m_authentication(
                 "refresh_token"
             ),  # M2M typically doesn't have refresh tokens
             "expires_at": expires_at,
-            "token_type": token_data.get("token_type", "Bearer"),
+            "token_type": token_data.get("token_type", "Bearer"),  # nosec B105 - OAuth2 standard token type per RFC 6750
             "provider": "cognito_m2m",
             "client_id": client_id,
             "user_pool_id": user_pool_id,
@@ -388,7 +388,7 @@ def _save_ingress_tokens(token_data: dict[str, Any]) -> str:
             )
             if token_data.get("expires_at")
             else None,
-            "token_type": token_data.get("token_type", "Bearer"),
+            "token_type": token_data.get("token_type", "Bearer"),  # nosec B105 - OAuth2 standard token type per RFC 6750
             "client_id": token_data["client_id"],
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
         }

@@ -192,7 +192,7 @@ def _save_egress_token(
         "access_token": token_response["access_token"],
         "expires_at": expires_at,
         "expires_at_human": expires_at_human,
-        "token_type": token_response.get("token_type", "Bearer"),
+        "token_type": token_response.get("token_type", "Bearer"),  # nosec B105 - OAuth2 standard token type per RFC 6750
         "scope": token_response.get("scope", "invoke:gateway"),
         "saved_at": saved_at,
         "usage_notes": f"This token is for EGRESS authentication to {provider} external services",

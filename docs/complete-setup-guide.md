@@ -2,6 +2,16 @@
 
 This guide provides a comprehensive, step-by-step walkthrough for setting up the MCP Gateway & Registry on a fresh AWS EC2 instance. Perfect for first-time users who want to get the system running from zero.
 
+> **SECURITY WARNING**
+>
+> The examples in this document use placeholder credentials for demonstration purposes only.
+> **NEVER use these example values in production.**
+>
+> Always generate unique, secure credentials and store them in:
+> - AWS Secrets Manager (production)
+> - Environment variables (development)
+> - `.env` files (local only, never commit)
+
 ## Table of Contents
 1. [AWS EC2 Instance Setup](#1-aws-ec2-instance-setup)
 2. [Initial System Configuration](#2-initial-system-configuration)

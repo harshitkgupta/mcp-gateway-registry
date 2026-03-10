@@ -693,6 +693,25 @@ echo 'ASOR_ACCESS_TOKEN=your_token' >> .env
 
 **Fine-Grained Permissions:** Tool-level, method-level, team-based, and temporary access controls. [Learn more](docs/scopes.md)
 
+### Secrets & Credentials Management
+
+**Required secrets** must be provided via environment variables or a secrets manager. Never hardcode secrets in source code or commit them to version control.
+
+| Variable | Description | How to Obtain |
+|----------|-------------|---------------|
+| `KEYCLOAK_M2M_SECRET` | OAuth2 client secret for M2M authentication | Keycloak admin console or AWS Secrets Manager |
+| `KEYCLOAK_CLIENT_SECRET` | OAuth2 client secret for web client | Keycloak admin console |
+| `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin password | Set during initial setup |
+
+**Retrieve from AWS Secrets Manager:**
+```bash
+export KEYCLOAK_M2M_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id mcp-gateway/keycloak-m2m-secret \
+  --query SecretString --output text | jq -r .client_secret)
+```
+
+See [cli/.env.example](cli/.env.example) for a template and [docs/auth-mgmt.md](docs/auth-mgmt.md) for full credential management instructions.
+
 ### Deployment Options
 
 **Cloud Platforms:** Amazon EC2, Amazon EKS

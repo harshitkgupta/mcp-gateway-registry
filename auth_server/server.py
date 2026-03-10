@@ -717,7 +717,7 @@ class GenerateTokenResponse(BaseModel):
 
     access_token: str
     refresh_token: str | None = None
-    token_type: str = "Bearer"
+    token_type: str = "Bearer"  # nosec B105 - OAuth2 standard token type per RFC 6750
     expires_in: int
     refresh_expires_in: int | None = None
     scope: str

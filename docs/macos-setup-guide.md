@@ -2,6 +2,16 @@
 
 This guide provides a comprehensive, step-by-step walkthrough for setting up the MCP Gateway & Registry on macOS. Perfect for local development and testing.
 
+> **SECURITY WARNING**
+>
+> The examples in this document use placeholder credentials for demonstration purposes only.
+> **NEVER use these example values in production.**
+>
+> Always generate unique, secure credentials and store them in:
+> - AWS Secrets Manager (production)
+> - Environment variables (development)
+> - `.env` files (local only, never commit)
+
 ## Table of Contents
 1. [Prerequisites](#1-prerequisites)
 2. [Container Runtime Choice](#2-container-runtime-choice)
