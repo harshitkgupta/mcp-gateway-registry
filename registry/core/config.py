@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     documentdb_username: str | None = None
     documentdb_password: str | None = None
     documentdb_use_tls: bool = True
-    documentdb_tls_ca_file: str = "global-bundle.pem"
+    documentdb_tls_ca_file: str = "/app/certs/global-bundle.pem"
     documentdb_use_iam: bool = False
     documentdb_replica_set: str | None = None
     documentdb_read_preference: str = "secondaryPreferred"

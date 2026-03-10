@@ -78,8 +78,10 @@ RUN mkdir -p /app/registry/models && \
     . .venv/bin/activate && \
     python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2').save('/app/registry/models/all-MiniLM-L6-v2')"
 
-# Create logs directory
-RUN mkdir -p /app/logs
+# Create logs and certs directories
+RUN mkdir -p /app/logs && \
+    mkdir -p /app/certs && \
+    mkdir -p /app/security_scans
 
 # Create nginx lua directories and remove default sites (needed by entrypoint script)
 RUN mkdir -p /etc/nginx/lua/virtual_mappings && \
@@ -105,7 +107,7 @@ RUN groupadd -g 1000 appuser && useradd -u 1000 -g appuser appuser
 # Set ownership for runtime-writable directories and entrypoint
 # Note: Use targeted chown instead of chown -R /app to avoid slow recursive
 # ownership change on .venv (thousands of files that don't need write access)
-RUN chown -R appuser:appuser /app/logs /app/registry /etc/nginx /var/log/nginx /var/lib/nginx /run/nginx && \
+RUN chown -R appuser:appuser /app/logs /app/certs /app/security_scans /app/registry /etc/nginx /var/log/nginx /var/lib/nginx /run/nginx && \
     chown appuser:appuser /app /app/registry-entrypoint.sh
 
 # Switch to non-root user

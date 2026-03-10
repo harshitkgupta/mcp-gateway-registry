@@ -650,7 +650,7 @@ Examples:
     )
     parser.add_argument(
         "--tls-ca-file",
-        default=os.getenv("DOCUMENTDB_TLS_CA_FILE", "/app/global-bundle.pem"),
+        default=os.getenv("DOCUMENTDB_TLS_CA_FILE", "/app/certs/global-bundle.pem"),
         help="TLS CA file path",
     )
 

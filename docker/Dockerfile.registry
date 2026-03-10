@@ -119,12 +119,14 @@ COPY --from=frontend-builder --chown=appuser:appuser /app/frontend/build /app/fr
 # Note: /app files already have correct ownership via --chown on COPY commands above.
 # Only chown directories that are created here (not covered by COPY --chown).
 RUN mkdir -p /app/logs && \
+    mkdir -p /app/certs && \
+    mkdir -p /app/security_scans && \
     mkdir -p /etc/nginx/lua/virtual_mappings && \
     rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default && \
     mkdir -p /var/lib/nginx/body /var/lib/nginx/proxy /var/lib/nginx/fastcgi /var/lib/nginx/uwsgi /var/lib/nginx/scgi && \
     mkdir -p /var/log/nginx && \
     mkdir -p /run/nginx && \
-    chown -R appuser:appuser /app/logs /etc/nginx /var/log/nginx /var/lib/nginx /run/nginx
+    chown -R appuser:appuser /app/logs /app/certs /app/security_scans /etc/nginx /var/log/nginx /var/lib/nginx /run/nginx
 
 # Expose ports for nginx (HTTP/HTTPS on high ports for non-root) and registry
 EXPOSE 8080 8443 7860

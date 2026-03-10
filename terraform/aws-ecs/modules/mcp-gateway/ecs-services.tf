@@ -212,7 +212,7 @@ module "ecs_service_auth" {
         },
         {
           name  = "DOCUMENTDB_TLS_CA_FILE"
-          value = "/app/global-bundle.pem"
+          value = "/app/certs/global-bundle.pem"
         },
         {
           name  = "AUDIT_LOG_ENABLED"
@@ -575,7 +575,7 @@ module "ecs_service_registry" {
         },
         {
           name  = "DOCUMENTDB_TLS_CA_FILE"
-          value = "/app/global-bundle.pem"
+          value = "/app/certs/global-bundle.pem"
         },
         {
           name  = "REGISTRY_ID"

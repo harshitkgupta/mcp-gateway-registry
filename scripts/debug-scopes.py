@@ -18,7 +18,7 @@ async def debug_scopes():
     database = os.getenv("DOCUMENTDB_DATABASE", "mcp_registry")
     namespace = os.getenv("DOCUMENTDB_NAMESPACE", "default")
     use_tls = os.getenv("DOCUMENTDB_USE_TLS", "true").lower() == "true"
-    ca_file = os.getenv("DOCUMENTDB_TLS_CA_FILE", "/app/global-bundle.pem")
+    ca_file = os.getenv("DOCUMENTDB_TLS_CA_FILE", "/app/certs/global-bundle.pem")
 
     print("=" * 80)
     print("DocumentDB Scopes Debug")

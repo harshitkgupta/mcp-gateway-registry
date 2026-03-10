@@ -49,8 +49,9 @@ RUN chmod +x /app/auth-entrypoint.sh
 COPY auth_server/ /app/
 COPY registry/ /app/registry/
 
-# Create logs directory
-RUN mkdir -p /app/logs
+# Create logs and certs directories
+RUN mkdir -p /app/logs && \
+    mkdir -p /app/certs
 
 # Expose port
 EXPOSE 8888
@@ -62,8 +63,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 # Create non-root user for security (CIS Docker Benchmark 4.1)
 RUN groupadd -g 1000 appuser && useradd -u 1000 -g appuser appuser
 
-# Set ownership of application files, venv, logs, and entrypoint
-RUN chown -R appuser:appuser /app /app/.venv /app/logs /app/auth-entrypoint.sh
+# Set ownership of application files, venv, logs, certs, and entrypoint
+RUN chown -R appuser:appuser /app /app/.venv /app/logs /app/certs /app/auth-entrypoint.sh
 
 # Switch to non-root user
 USER appuser

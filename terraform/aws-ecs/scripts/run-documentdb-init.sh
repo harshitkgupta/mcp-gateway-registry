@@ -271,7 +271,7 @@ TASK_ARN=$(aws ecs run-task \
                     {"name": "DOCUMENTDB_NAMESPACE", "value": "default"},
                     {"name": "DOCUMENTDB_USE_TLS", "value": "true"},
                     {"name": "DOCUMENTDB_USE_IAM", "value": "false"},
-                    {"name": "DOCUMENTDB_TLS_CA_FILE", "value": "/app/global-bundle.pem"}
+                    {"name": "DOCUMENTDB_TLS_CA_FILE", "value": "/app/certs/global-bundle.pem"}
                 ]
             }]
         }')" \
