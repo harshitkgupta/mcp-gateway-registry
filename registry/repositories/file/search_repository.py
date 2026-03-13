@@ -58,17 +58,17 @@ class FaissSearchRepository(SearchRepositoryBase):
 
     async def initialize(self) -> None:
         """Initialize the search repository."""
-        # FAISS service initializes itself
-        pass
+        # Explicitly initialize the shared FAISS service used by this repository.
+        await self.faiss_service.initialize()
 
     async def index_server(
         self, server_path: str, server_data: dict[str, Any], is_enabled: bool
     ) -> None:
         """Index a server."""
-        await self.index_entity(server_path, server_data, "server", is_enabled)
+        await self.index_entity(server_path, server_data, "mcp_server", is_enabled)
 
     async def index_agent(
         self, agent_path: str, agent_data: dict[str, Any], is_enabled: bool
     ) -> None:
         """Index an agent."""
-        await self.index_entity(agent_path, agent_data, "agent", is_enabled)
+        await self.index_entity(agent_path, agent_data, "a2a_agent", is_enabled)
