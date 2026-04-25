@@ -1,0 +1,19 @@
+# Compiled output
+dist/
+*.js
+*.d.ts
+*.js.map
+
+# CDK asset staging
+cdk.out/
+cdk.context.json
+
+# Dependencies
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
