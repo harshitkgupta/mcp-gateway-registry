@@ -1234,6 +1234,49 @@ export class RegistryServiceStack extends cdk.Stack {
     cdk.Tags.of(this).add('Component', 'service');
     cdk.Tags.of(this).add('Environment', 'production');
     cdk.Tags.of(this).add('ManagedBy', 'cdk');
+
+    // ==================================================================
+    // Section 14: Stack Outputs
+    // ==================================================================
+
+    new cdk.CfnOutput(this, 'RegistryUrl', {
+      value: this.registryUrl,
+      description: 'MCP Gateway Registry URL',
+    });
+
+    new cdk.CfnOutput(this, 'RegistryAlbDnsName', {
+      value: this.registryAlbDns,
+      description: 'Registry ALB DNS name',
+    });
+
+    new cdk.CfnOutput(this, 'KeycloakUrl', {
+      value: authStack.keycloakUrl,
+      description: 'Keycloak identity provider URL',
+    });
+
+    new cdk.CfnOutput(this, 'GradioUiUrl', {
+      value: `${this.registryUrl.replace(/:\d+$/, '')}:7860`,
+      description: 'Gradio UI URL (port 7860)',
+    });
+
+    if (config.enableObservability) {
+      new cdk.CfnOutput(this, 'GrafanaUrl', {
+        value: `${this.registryUrl}/grafana`,
+        description: 'Grafana dashboard URL',
+      });
+    }
+
+    new cdk.CfnOutput(this, 'ServiceEndpoints', {
+      value: JSON.stringify({
+        registry: `${this.registryUrl}`,
+        registryApi: `${this.registryUrl}/api/v1`,
+        registryHealth: `${this.registryUrl}/health`,
+        keycloak: authStack.keycloakUrl,
+        authServer: `${this.registryUrl}:8888`,
+        gradioUi: `${this.registryUrl.replace(/:\d+$/, '')}:7860`,
+      }),
+      description: 'All service endpoints as JSON',
+    });
   }
 }
 

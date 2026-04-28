@@ -14,6 +14,8 @@
 
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { RegistryConfig } from './registry-config';
 
@@ -46,6 +48,29 @@ export class RegistryNetworkStack extends cdk.Stack {
     super(scope, id, props);
 
     const config = props.config;
+
+    // ------------------------------------------------------------------
+    // Service-linked roles (idempotent - ignores "already exists" error)
+    // ------------------------------------------------------------------
+
+    for (const serviceName of ['ecs.amazonaws.com', 'elasticloadbalancing.amazonaws.com']) {
+      const shortName = serviceName.split('.')[0]; // 'ecs' or 'elasticloadbalancing'
+      new cr.AwsCustomResource(this, `${shortName}Slr`, {
+        onCreate: {
+          service: 'IAM',
+          action: 'createServiceLinkedRole',
+          parameters: { AWSServiceName: serviceName },
+          physicalResourceId: cr.PhysicalResourceId.of(`slr-${shortName}`),
+          ignoreErrorCodesMatching: 'InvalidInput', // "has been taken" = already exists
+        },
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['iam:CreateServiceLinkedRole'],
+            resources: [`arn:aws:iam::*:role/aws-service-role/${serviceName}/*`],
+          }),
+        ]),
+      });
+    }
 
     // ------------------------------------------------------------------
     // VPC

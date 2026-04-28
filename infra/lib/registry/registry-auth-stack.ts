@@ -106,5 +106,24 @@ export class RegistryAuthStack extends cdk.Stack {
     cdk.Tags.of(this).add('Component', 'auth');
     cdk.Tags.of(this).add('Environment', 'production');
     cdk.Tags.of(this).add('ManagedBy', 'cdk');
+
+    // ------------------------------------------------------------------
+    // Stack Outputs
+    // ------------------------------------------------------------------
+
+    new cdk.CfnOutput(this, 'KeycloakUrl', {
+      value: this.keycloakUrl,
+      description: 'Keycloak URL',
+    });
+
+    new cdk.CfnOutput(this, 'KeycloakAlbDnsName', {
+      value: this.keycloakAlbDns,
+      description: 'Keycloak ALB DNS name',
+    });
+
+    new cdk.CfnOutput(this, 'KeycloakAdminConsole', {
+      value: `${this.keycloakUrl}/admin`,
+      description: 'Keycloak admin console URL',
+    });
   }
 }
