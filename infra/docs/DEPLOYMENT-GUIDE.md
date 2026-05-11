@@ -1,8 +1,32 @@
 # MCP Gateway Registry - Deployment Guide
 
-*Last Updated: 2026-04-28*
+*Last Updated: 2026-05-06*
 
-This guide covers post-deployment access, credentials, commands, and troubleshooting for the CDK-deployed MCP Gateway Registry.
+This guide covers end-to-end deployment, post-deployment access, agent registration, credentials, commands, and troubleshooting for the CDK-deployed MCP Gateway Registry.
+
+## Deployment Overview
+
+The deployment is a two-phase process:
+
+1. **CDK Deploy** - Provisions all AWS infrastructure (VPC, DocumentDB, Keycloak, ECS services, ALB, etc.)
+2. **Post-Deploy Script** - Configures Keycloak, loads scopes, wires up secrets, and validates endpoints
+
+```bash
+# Phase 1: CDK deploy
+cd infra && npm run build && npx cdk deploy --all --region us-east-1 --require-approval never
+
+# Phase 2: Post-deploy automation
+export CDK_KEYCLOAK_ADMIN_PASSWORD="<your-password>"
+./infra/scripts/post-deploy.sh
+```
+
+## Prerequisites
+
+- AWS CLI v2 configured with Admin-equivalent IAM permissions
+- Node.js 18+ and npm installed
+- `jq` installed (`brew install jq` on macOS)
+- Docker (for building container images)
+- Container images pushed to ECR or Docker Hub (configured in `infra/config.yaml` under `images:`)
 
 ## Service URLs
 
@@ -54,21 +78,17 @@ The Registry UI authenticates through Keycloak. Users are created by `init-keycl
 
 | User | Password | Role / Groups |
 |------|----------|---------------|
-| `admin` | `MyAdmin2026pass` | Realm admin -- all groups including `mcp-registry-admin` |
-| `testuser` | `testpass` | User / developer / operator |
+| `admin` | `<CDK_KEYCLOAK_ADMIN_PASSWORD>` | Realm admin -- all groups including `mcp-registry-admin` |
+| `testuser` | `testpass123` | User / developer / operator |
 | `lob1-user` | `lob1pass` | LOB1 scoped user (`registry-users-lob1`) |
 | `lob2-user` | `lob2pass` | LOB2 scoped user (`registry-users-lob2`) |
-
-Note: The `admin` user password is loaded from Secrets Manager during init. The passwords above are the defaults set by `init-keycloak.sh`.
 
 ### Grafana
 
 | Field | Value |
 |-------|-------|
 | Username | `admin` |
-| Password | Your `CDK_GRAFANA_ADMIN_PASSWORD` value |
-
-If `CDK_GRAFANA_ADMIN_PASSWORD` was not set, Grafana defaults to `admin` / `admin` and prompts you to change it on first login.
+| Password | Your `CDK_GRAFANA_ADMIN_PASSWORD` value (default: `admin`) |
 
 ### DocumentDB
 
@@ -102,9 +122,11 @@ aws secretsmanager get-secret-value --secret-id mcp-gateway-keycloak-m2m-client-
   --region us-east-1 --query 'SecretString' --output text
 ```
 
+---
+
 ## Deployment Commands
 
-### Deploy
+### Full Deployment (CDK + Post-Deploy)
 
 ```bash
 # Set required secrets
@@ -116,35 +138,326 @@ export CDK_DOCUMENTDB_ADMIN_PASSWORD="<password>"
 export CDK_GRAFANA_ADMIN_PASSWORD="<password>"
 export CDK_EMBEDDINGS_API_KEY="<key>"
 
-# Deploy all stacks
+# Deploy all stacks + run post-deploy
 ./infra/scripts/deploy.sh
+```
 
-# Deploy a single stack
+### Deploy a Single Stack
+
+```bash
 ./infra/scripts/deploy.sh --stack Registry-Auth
 ```
 
-### Post-Deploy: Initialize Keycloak
+### Post-Deploy Script (Automated)
 
-Run once after first deployment to create the `mcp-gateway` realm, clients, users, and groups:
+The `post-deploy.sh` script handles all configuration steps automatically:
 
 ```bash
-KEYCLOAK_ADMIN_URL=http://<keycloak-alb-dns> \
+export CDK_KEYCLOAK_ADMIN_PASSWORD="<your-password>"
+./infra/scripts/post-deploy.sh
+```
+
+**What it does (10 steps):**
+
+| Step | Action | Description |
+|------|--------|-------------|
+| 1 | Read CDK outputs | Extracts Keycloak/Registry URLs from `cdk-outputs.json` |
+| 2 | Wait for Keycloak | Polls ALB until Keycloak is healthy (up to 5 min) |
+| 3 | Disable SSL (ECS Exec) | Uses `kcadm.sh` inside Keycloak container to disable `sslRequired` on master realm |
+| 4 | Initialize Keycloak | Runs `init-keycloak.sh` to create realm, clients, groups, users |
+| 5 | Disable SSL (API) | Disables `sslRequired` on `mcp-gateway` realm via Admin API |
+| 6 | Update Secrets Manager | Extracts real client secrets from Keycloak and stores in Secrets Manager |
+| 7 | Load Scopes | Runs `load-scopes.py` via ECS Exec to populate DocumentDB with scope/permission data |
+| 8 | Restart Services | Force-deploys registry and auth-server to pick up new secrets |
+| 9 | Validate Endpoints | Health checks all service endpoints |
+| 10 | Print Summary | Displays URLs and login credentials |
+
+### Manual Post-Deploy Steps (If Script Fails)
+
+If the automated script fails at a specific step, you can run the steps manually:
+
+```bash
+# Get URLs
+KEYCLOAK_URL="http://<keycloak-alb-dns>"
+REGISTRY_URL="http://<registry-alb-dns>"
+
+# Step 3: Disable SSL via ECS Exec
+TASK_ID=$(aws ecs list-tasks --cluster keycloak --service-name keycloak \
+  --region us-east-1 --desired-status RUNNING --query 'taskArns[0]' --output text)
+TASK_ID="${TASK_ID##*/}"
+aws ecs execute-command --cluster keycloak --task "$TASK_ID" \
+  --container keycloak --interactive \
+  --command "sh -c '/opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user admin --password <KC_PASSWORD> && /opt/keycloak/bin/kcadm.sh update realms/master -s sslRequired=NONE'" \
+  --region us-east-1
+
+# Step 4: Init Keycloak
+KEYCLOAK_ADMIN_URL=$KEYCLOAK_URL \
 KEYCLOAK_ADMIN=admin \
-KEYCLOAK_ADMIN_PASSWORD="<your CDK_KEYCLOAK_ADMIN_PASSWORD>" \
-AUTH_SERVER_EXTERNAL_URL=http://<registry-alb-dns> \
-REGISTRY_URL=http://<registry-alb-dns> \
-bash terraform/aws-ecs/scripts/init-keycloak.sh
+KEYCLOAK_ADMIN_PASSWORD="<KC_PASSWORD>" \
+AUTH_SERVER_EXTERNAL_URL=$REGISTRY_URL \
+REGISTRY_URL=$REGISTRY_URL \
+bash keycloak/setup/init-keycloak.sh
+
+# Step 7: Load scopes
+TASK_ID=$(aws ecs list-tasks --cluster mcp-gateway-ecs-cluster \
+  --service-name mcp-gateway-registry --region us-east-1 \
+  --desired-status RUNNING --query 'taskArns[0]' --output text)
+TASK_ID="${TASK_ID##*/}"
+aws ecs execute-command --cluster mcp-gateway-ecs-cluster --task "$TASK_ID" \
+  --container registry --interactive \
+  --command "sh -c '/app/.venv/bin/python scripts/load-scopes.py --scopes-file /app/config/scopes.yml'" \
+  --region us-east-1
+
+# Step 8: Restart services
+aws ecs update-service --cluster mcp-gateway-ecs-cluster --service mcp-gateway-registry --force-new-deployment --region us-east-1
+aws ecs update-service --cluster mcp-gateway-ecs-cluster --service mcp-gateway-auth-server --force-new-deployment --region us-east-1
 ```
 
-Then restart ECS services to pick up the new client secrets:
+---
+
+## Agent Registration
+
+### Getting an Access Token
+
+Tokens expire in **5 minutes**. Always get a fresh token immediately before use.
 
 ```bash
-for svc in $(aws ecs list-services --cluster mcp-gateway-ecs-cluster --region us-east-1 --query 'serviceArns[]' --output text); do
-  aws ecs update-service --cluster mcp-gateway-ecs-cluster --service "$svc" --force-new-deployment --region us-east-1 --query 'service.serviceName' --output text
-done
+# Method 1: Password grant (admin user)
+KEYCLOAK_URL="http://<keycloak-alb-dns>"
+REGISTRY_URL="http://<registry-alb-dns>"
+
+CLIENT_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id mcp-gateway-keycloak-client-secret \
+  --region us-east-1 --query 'SecretString' --output text | python3 -c "import sys,json; print(json.load(sys.stdin)['client_secret'])")
+
+TOKEN=$(curl -s -X POST "${KEYCLOAK_URL}/realms/mcp-gateway/protocol/openid-connect/token" \
+  -d "grant_type=password" \
+  -d "client_id=mcp-gateway-web" \
+  -d "client_secret=${CLIENT_SECRET}" \
+  -d "username=admin" \
+  -d "password=<CDK_KEYCLOAK_ADMIN_PASSWORD>" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+echo $TOKEN
 ```
 
-### Status and Inspection
+```bash
+# Method 2: M2M client credentials (no user involved)
+M2M_SECRET=$(aws secretsmanager get-secret-value \
+  --secret-id mcp-gateway-keycloak-m2m-client-secret \
+  --region us-east-1 --query 'SecretString' --output text | python3 -c "import sys,json; print(json.load(sys.stdin)['client_secret'])")
+
+TOKEN=$(curl -s -X POST "${KEYCLOAK_URL}/realms/mcp-gateway/protocol/openid-connect/token" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=mcp-gateway-m2m" \
+  -d "client_secret=${M2M_SECRET}" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+
+### Register an Agent (curl)
+
+```bash
+# Get fresh token (expires in 5 min!)
+TOKEN=$(curl -s -X POST "${KEYCLOAK_URL}/realms/mcp-gateway/protocol/openid-connect/token" \
+  -d "grant_type=password" \
+  -d "client_id=mcp-gateway-web" \
+  -d "client_secret=${CLIENT_SECRET}" \
+  -d "username=admin" \
+  -d "password=<CDK_KEYCLOAK_ADMIN_PASSWORD>" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Register agent (agents always start as DISABLED by design)
+curl -X POST "${REGISTRY_URL}/api/agents/register" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-agent",
+    "description": "My A2A agent",
+    "url": "https://my-agent.example.com",
+    "supportedProtocol": "a2a",
+    "visibility": "public",
+    "version": "1.0.0",
+    "path": "/my-agent",
+    "tags": ["team:myteam", "domain:engineering"]
+  }'
+
+# Enable the agent (required - agents register as disabled by default)
+curl -X POST "${REGISTRY_URL}/api/agents/my-agent/toggle?enabled=true" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Required fields:**
+| Field | Type | Valid Values |
+|-------|------|--------------|
+| `name` | string | Any non-empty string |
+| `url` | string | Valid URL for the agent endpoint |
+| `supportedProtocol` | string | `a2a`, `other` |
+
+**Important optional fields:**
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `visibility` | string | `"public"` | `public`, `private`, `group-restricted` |
+| `version` | string | `null` | Semantic version (e.g. `1.0.0`) |
+| `path` | string | auto-generated | Agent path in registry (e.g. `/my-agent`) |
+| `description` | string | `""` | Human-readable description |
+| `tags` | list[string] | `[]` | Tags for discovery (format: `key:value`) |
+| `streaming` | boolean | `false` | Whether agent supports streaming |
+| `license` | string | `"N/A"` | License information |
+
+**Note:** The `isEnabled` field is NOT part of the registration API. Agents always start disabled as a security measure. Use the toggle endpoint to enable them after registration.
+
+### Register an Agent (Catalyst CLI)
+
+```bash
+cd /path/to/agentcore-catalyst
+
+# Set registry URL and token
+export CATALYST_REGISTRY_URL="http://<registry-alb-dns>"
+export CATALYST_REGISTRY_TOKEN="$TOKEN"
+
+# Register using agent definition YAML
+uv run catalyst register examples/agent-definition.yaml --visibility org
+
+# Or with explicit overrides
+uv run catalyst register examples/agent-definition.yaml \
+  --registry-url "$REGISTRY_URL" \
+  --registry-token "$TOKEN" \
+  --visibility public \
+  --name my-agent \
+  --version 2.0.0
+
+# Dry run (preview payload without registering)
+uv run catalyst register examples/agent-definition.yaml --dry-run
+
+# After registration, enable the agent via curl:
+curl -X POST "${CATALYST_REGISTRY_URL}/api/agents/<agent-path>/toggle?enabled=true" \
+  -H "Authorization: Bearer $CATALYST_REGISTRY_TOKEN"
+```
+
+**Catalyst CLI visibility mapping:**
+| CLI Value | Registry API Value |
+|-----------|-------------------|
+| `private` | `private` |
+| `team` (default) | `group-restricted` |
+| `org` | `public` |
+| `public` | `public` (pass-through) |
+| `group-restricted` | `group-restricted` (pass-through) |
+
+### One-Liner: Full Registration Flow
+
+```bash
+# All-in-one: get token + register + enable
+KEYCLOAK_URL="http://keycloak-alb-1609600320.us-east-1.elb.amazonaws.com"
+REGISTRY_URL="http://mcp-gateway-alb-1080691333.us-east-1.elb.amazonaws.com"
+
+CLIENT_SECRET=$(aws secretsmanager get-secret-value --secret-id mcp-gateway-keycloak-client-secret --region us-east-1 --query 'SecretString' --output text | python3 -c "import sys,json; print(json.load(sys.stdin)['client_secret'])")
+KC_PASSWORD=$(aws ssm get-parameter --name /keycloak/admin_password --with-decryption --region us-east-1 --query 'Parameter.Value' --output text)
+
+TOKEN=$(curl -s -X POST "${KEYCLOAK_URL}/realms/mcp-gateway/protocol/openid-connect/token" -d "grant_type=password" -d "client_id=mcp-gateway-web" -d "client_secret=${CLIENT_SECRET}" -d "username=admin" -d "password=${KC_PASSWORD}" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# Register
+curl -s -X POST "${REGISTRY_URL}/api/agents/register" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"name":"my-agent","url":"https://my-agent.example.com","supportedProtocol":"a2a","visibility":"public","path":"/my-agent"}'
+
+# Enable (agents start disabled by default)
+curl -s -X POST "${REGISTRY_URL}/api/agents/my-agent/toggle?enabled=true" -H "Authorization: Bearer $TOKEN"
+```
+
+### List Registered Agents
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "${REGISTRY_URL}/api/agents" | python3 -m json.tool
+```
+
+### Get Registry Stats
+
+```bash
+# Requires authentication
+curl -s -H "Authorization: Bearer $TOKEN" "${REGISTRY_URL}/api/stats" | python3 -m json.tool
+```
+
+Returns: uptime, deployment type (ECS), registry_stats (servers/agents/skills counts), database health, auth status.
+
+### Get Single Agent Details
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "${REGISTRY_URL}/api/agents/<agent-path>" | python3 -m json.tool
+```
+
+### Enable/Disable an Agent
+
+```bash
+# Enable (POST to toggle endpoint with ?enabled=true)
+curl -X POST "${REGISTRY_URL}/api/agents/my-agent/toggle?enabled=true" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Disable
+curl -X POST "${REGISTRY_URL}/api/agents/my-agent/toggle?enabled=false" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Delete an Agent
+
+```bash
+curl -X DELETE "${REGISTRY_URL}/api/agents/my-agent" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
+## Key Configuration
+
+### config.yaml Critical Settings
+
+These settings in `infra/config.yaml` affect authentication and scopes:
+
+```yaml
+registry:
+  # MUST be 'documentdb' for scopes to work in ECS deployment
+  # The file-based backend looks for /app/auth_server/scopes.yml which doesn't exist in the container
+  storageBackend: documentdb
+
+  # MUST be false when running over HTTP (no TLS termination at ALB)
+  session:
+    cookieSecure: false
+```
+
+### Scopes Configuration
+
+Scopes define what each Keycloak group can access. The source of truth is `registry/config/scopes.yml`.
+
+**How scopes are loaded:**
+1. `scopes.yml` is baked into the container image at `/app/config/scopes.yml`
+2. `post-deploy.sh` Step 7 runs `load-scopes.py` to insert scope documents into DocumentDB
+3. Auth server queries DocumentDB `mcp_scopes_default` collection at runtime
+
+**Group mappings (scopes.yml):**
+```yaml
+group_mappings:
+  mcp-registry-admin:    # Keycloak group
+  - registry-admins      # Maps to scope with full admin access
+  - mcp-servers-unrestricted/read
+  - mcp-servers-unrestricted/execute
+  registry-users-lob1:
+  - registry-users-lob1  # Maps to scope with LOB1 restricted access
+  registry-users-lob2:
+  - registry-users-lob2  # Maps to scope with LOB2 restricted access
+```
+
+**Reloading scopes after changes:**
+```bash
+# 1. Edit registry/config/scopes.yml
+# 2. Rebuild and push container image
+# 3. Redeploy registry service, then reload:
+TASK_ID=$(aws ecs list-tasks --cluster mcp-gateway-ecs-cluster \
+  --service-name mcp-gateway-registry --region us-east-1 \
+  --desired-status RUNNING --query 'taskArns[0]' --output text)
+TASK_ID="${TASK_ID##*/}"
+aws ecs execute-command --cluster mcp-gateway-ecs-cluster --task "$TASK_ID" \
+  --container registry --interactive \
+  --command "sh -c '/app/.venv/bin/python scripts/load-scopes.py --scopes-file /app/config/scopes.yml'" \
+  --region us-east-1
+```
+
+---
+
+## Status and Inspection
 
 ```bash
 # Stack status
@@ -167,7 +480,7 @@ aws ecs describe-services --cluster mcp-gateway-ecs-cluster \
   --output table
 ```
 
-### Restart Services
+## Restart Services
 
 ```bash
 # Restart a single service
@@ -185,7 +498,7 @@ aws ecs update-service --cluster keycloak \
   --force-new-deployment --region us-east-1
 ```
 
-### Destroy
+## Destroy
 
 ```bash
 # Destroy all stacks (prompts for confirmation)
@@ -195,30 +508,7 @@ aws ecs update-service --cluster keycloak \
 ./infra/scripts/deploy.sh --destroy --stack Registry-Service
 ```
 
-### M2M API Access
-
-Get a machine-to-machine token:
-
-```bash
-# Get M2M client secret
-M2M_SECRET=$(aws secretsmanager get-secret-value \
-  --secret-id mcp-gateway-keycloak-m2m-client-secret \
-  --region us-east-1 --query 'SecretString' --output text | python3 -c "import sys,json; print(json.load(sys.stdin)['client_secret'])")
-
-# Request token
-curl -X POST http://<keycloak-alb-dns>/realms/mcp-gateway/protocol/openid-connect/token \
-  -d "grant_type=client_credentials" \
-  -d "client_id=mcp-gateway-m2m" \
-  -d "client_secret=$M2M_SECRET"
-
-# Use token with Registry API
-TOKEN=$(curl -s -X POST http://<keycloak-alb-dns>/realms/mcp-gateway/protocol/openid-connect/token \
-  -d "grant_type=client_credentials" \
-  -d "client_id=mcp-gateway-m2m" \
-  -d "client_secret=$M2M_SECRET" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
-
-curl -H "Authorization: Bearer $TOKEN" http://<registry-alb-dns>/api/v1/servers
-```
+---
 
 ## ECS Clusters and Services
 
@@ -229,17 +519,70 @@ curl -H "Authorization: Bearer $TOKEN" http://<registry-alb-dns>/api/v1/servers
 
 ## CloudFormation Stacks
 
-| Stack | Purpose | Status After Clean Deploy |
-|-------|---------|--------------------------|
-| `Registry-Network` | VPC, subnets, NAT gateways, VPC endpoints | CREATE_COMPLETE |
-| `Registry-Data` | DocumentDB, Aurora (Keycloak DB), KMS keys, Secrets Manager | CREATE_COMPLETE |
-| `Registry-Auth` | Keycloak ECS service, ALB, ECR repo | CREATE_COMPLETE |
-| `Registry-Service` | Registry app, auth server, Grafana, metrics ECS services | CREATE_COMPLETE |
-| `Registry-Build` | CodeBuild project for Keycloak image builds | CREATE_COMPLETE |
-| `Registry-Ops` | CloudWatch dashboards, alarms (optional) | Not yet deployed |
-| `Registry-Cdn` | CloudFront distribution (optional) | Not yet deployed |
+| Stack | Purpose | Estimated Deploy Time |
+|-------|---------|----------------------|
+| `Registry-Network` | VPC, subnets, NAT gateways, VPC endpoints | ~3-5 min |
+| `Registry-Data` | DocumentDB, Aurora (Keycloak DB), KMS keys | ~10-15 min |
+| `Registry-Auth` | Keycloak ECS service, ALB, ECR repo | ~5-8 min |
+| `Registry-Service` | Registry app, auth server, Grafana, metrics | ~5-10 min |
+| `Registry-Ops` | Secret rotation Lambdas | ~2-3 min |
+| `Registry-Cdn` | CloudFront + WAF (optional) | ~3-5 min |
+| `Registry-Build` | ECR repos + CodeBuild (optional) | ~2-3 min |
+
+---
 
 ## Troubleshooting
+
+### Agent Registration Returns 500
+
+The 500 is typically nginx wrapping a non-200 response from the auth-server or registry into HTML. The actual error is hidden inside.
+
+**Most common causes (in order of likelihood):**
+
+1. **Expired token** (5-minute TTL) -- get a fresh token and retry immediately
+2. **Missing `supportedProtocol` field** in request body (required, valid: `a2a`, `other`)
+3. **Invalid `visibility` value** (valid: `public`, `private`, `group-restricted`; NOT `org`, `internal`, `team`)
+4. **Token user lacks `publish_agent` permission** -- user must be in `mcp-registry-admin` Keycloak group
+5. **Scopes not loaded** into DocumentDB -- run `load-scopes.py` via ECS Exec (see post-deploy steps)
+
+**Debug:**
+```bash
+# Check auth-server logs for the actual error (look for "mapped scopes" or "Permission denied")
+aws logs tail /ecs/mcp-gateway-auth-server --since 5m --region us-east-1
+
+# Check registry logs (look for validation errors showing the actual rejection reason)
+aws logs tail /ecs/mcp-gateway-registry --since 5m --region us-east-1
+
+# Test with raw curl to see the actual error (not 500 HTML)
+curl -s -X POST "${REGISTRY_URL}/api/agents/register" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test","url":"http://x.com","supportedProtocol":"a2a"}' | python3 -m json.tool
+```
+
+### Agent Registers as Disabled (by design)
+
+All agents start as disabled after registration. This is a deliberate security measure -- the `isEnabled` field is NOT part of the registration API and cannot be set during registration.
+
+To enable an agent after registration:
+
+```bash
+curl -X POST "${REGISTRY_URL}/api/agents/<agent-path>/toggle?enabled=true" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+The toggle endpoint requires `toggle_service` permission (admin users have this by default).
+
+### Empty Scopes (Permission Denied After Login)
+
+**Symptom:** Auth-server logs show `Final mapped scopes: []`
+
+**Cause:** Scopes not loaded into DocumentDB, or `STORAGE_BACKEND` is not `documentdb`.
+
+**Fix:**
+1. Verify `storageBackend: documentdb` in `infra/config.yaml`
+2. Run `load-scopes.py` via ECS Exec (see "Reloading scopes" above)
+3. Restart auth-server service
 
 ### `oauth2_callback_failed` on Login
 
@@ -260,20 +603,11 @@ aws secretsmanager get-secret-value --secret-id mcp-gateway-keycloak-client-secr
   --region us-east-1 --query 'SecretString' --output text
 ```
 
-If it shows `placeholder-will-be-updated-by-init-script`, re-run `init-keycloak.sh`.
+If it shows `placeholder-will-be-updated-by-init-script`, re-run `post-deploy.sh` or manually run `init-keycloak.sh`.
 
 ### Keycloak 404 on `/realms/mcp-gateway`
 
-The `mcp-gateway` realm has not been created. Run the init script:
-
-```bash
-KEYCLOAK_ADMIN_URL=http://<keycloak-alb-dns> \
-KEYCLOAK_ADMIN=admin \
-KEYCLOAK_ADMIN_PASSWORD="<password>" \
-AUTH_SERVER_EXTERNAL_URL=http://<registry-alb-dns> \
-REGISTRY_URL=http://<registry-alb-dns> \
-bash terraform/aws-ecs/scripts/init-keycloak.sh
-```
+The `mcp-gateway` realm has not been created. Run the post-deploy script or manually run `init-keycloak.sh`.
 
 ### Keycloak ECS Tasks Keep Restarting (Circuit Breaker)
 
@@ -284,12 +618,9 @@ aws logs tail /ecs/keycloak --since 30m --region us-east-1
 ```
 
 Common causes:
-- **Database connectivity**: Keycloak can't reach Aurora. Check security group allows ingress from Keycloak ECS SG to Aurora SG on port 5432.
+- **Database connectivity**: Keycloak can't reach Aurora. Check security group allows ingress from Keycloak ECS SG to Aurora SG on port 3306.
 - **HTTPS strict mode with HTTP ALB**: If `enableRoute53Dns` is `false`, ensure `KC_HOSTNAME_STRICT_HTTPS=false` and `KC_HTTP_ENABLED=true` in the Keycloak task definition.
-- **Bad admin password**: SSM `/keycloak/admin_password` contains characters not supported by Keycloak. Check with:
-  ```bash
-  aws ssm get-parameter --name /keycloak/admin_password --with-decryption --region us-east-1 --query 'Parameter.Value' --output text
-  ```
+- **Bad admin password**: SSM `/keycloak/admin_password` contains characters not supported by Keycloak.
 
 ### DocumentDB Password Validation Failure
 
@@ -299,40 +630,6 @@ The `CDK_DOCUMENTDB_ADMIN_PASSWORD` must be:
 - At least 8 characters
 - Printable ASCII only
 - Cannot contain: `/`, `@`, `"`, or spaces
-
-Fix and redeploy:
-
-```bash
-export CDK_DOCUMENTDB_ADMIN_PASSWORD="YourSecurePassword123"
-./infra/scripts/deploy.sh --stack Registry-Data
-```
-
-### Registry-Data Stack in `UPDATE_ROLLBACK_COMPLETE`
-
-The stack rolled back from a failed update but the original resources are intact. To update it again, fix the root cause (usually a password issue) and redeploy:
-
-```bash
-export CDK_DOCUMENTDB_ADMIN_PASSWORD="ValidPassword8Plus"
-export CDK_KEYCLOAK_DATABASE_PASSWORD="ValidPassword8Plus"
-./infra/scripts/deploy.sh --stack Registry-Data
-```
-
-### `grep: invalid option -- P` in deploy.sh
-
-macOS BSD grep does not support `-P` (Perl regex). This was fixed by using basic character class matching: `grep -q '[/@" ]'` instead of `grep -qP '[/@" ]'`.
-
-### ECS Service-Linked Role Missing
-
-Error during Auth or Service stack deployment: `service-linked role ... does not exist`
-
-The deploy script creates these idempotently. If deploying manually:
-
-```bash
-aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com --region us-east-1
-aws iam create-service-linked-role --aws-service-name elasticloadbalancing.amazonaws.com --region us-east-1
-```
-
-These are also created by the `AwsCustomResource` in `Registry-Network` stack.
 
 ### Viewing ECS Task Logs
 
@@ -353,14 +650,7 @@ aws logs tail /ecs/mcp-gateway-grafana --since 30m --region us-east-1
 aws logs tail /ecs/mcp-gateway-metrics-service --since 30m --region us-east-1
 ```
 
-### Checking Security Groups
-
-```bash
-# List all Registry security groups
-aws ec2 describe-security-groups --region us-east-1 \
-  --filters "Name=tag:Project,Values=mcp-gateway-registry" \
-  --query 'SecurityGroups[].{Name:GroupName,ID:GroupId}' --output table
-```
+---
 
 ## Environment Variables Reference
 
@@ -389,7 +679,7 @@ aws ec2 describe-security-groups --region us-east-1 \
 
 ### Password Requirements
 
-All database passwords (`CDK_DOCUMENTDB_ADMIN_PASSWORD`, `CDK_KEYCLOAK_DATABASE_PASSWORD`, `CDK_KEYCLOAK_ADMIN_PASSWORD`) must:
+All database passwords must:
 - Be at least **8 characters** long
 - Use **printable ASCII** characters only
 - **Not contain**: `/`, `@`, `"`, or spaces

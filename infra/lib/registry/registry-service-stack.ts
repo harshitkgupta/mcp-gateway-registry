@@ -1184,14 +1184,14 @@ export class RegistryServiceStack extends cdk.Stack {
       description: 'DocumentDB ingress from auth server ECS tasks',
     });
 
-    // Keycloak ALB SG ingress from registry + auth ECS SGs (port 443)
+    // Keycloak ALB SG ingress from registry + auth ECS SGs (port 443 for HTTPS, port 80 for HTTP)
     new ec2.CfnSecurityGroupIngress(this, 'KeycloakAlbFromRegistry', {
       groupId: authStack.keycloakAlbSg.securityGroupId,
       ipProtocol: 'tcp',
       fromPort: 443,
       toPort: 443,
       sourceSecurityGroupId: registryService.securityGroup.securityGroupId,
-      description: 'Keycloak ALB ingress from registry ECS tasks',
+      description: 'Keycloak ALB ingress from registry ECS tasks (HTTPS)',
     });
 
     new ec2.CfnSecurityGroupIngress(this, 'KeycloakAlbFromAuthSvc', {
@@ -1200,7 +1200,25 @@ export class RegistryServiceStack extends cdk.Stack {
       fromPort: 443,
       toPort: 443,
       sourceSecurityGroupId: authService.securityGroup.securityGroupId,
-      description: 'Keycloak ALB ingress from auth server ECS tasks',
+      description: 'Keycloak ALB ingress from auth server ECS tasks (HTTPS)',
+    });
+
+    new ec2.CfnSecurityGroupIngress(this, 'KeycloakAlbHttpFromRegistry', {
+      groupId: authStack.keycloakAlbSg.securityGroupId,
+      ipProtocol: 'tcp',
+      fromPort: 80,
+      toPort: 80,
+      sourceSecurityGroupId: registryService.securityGroup.securityGroupId,
+      description: 'Keycloak ALB ingress from registry ECS tasks (HTTP)',
+    });
+
+    new ec2.CfnSecurityGroupIngress(this, 'KeycloakAlbHttpFromAuthSvc', {
+      groupId: authStack.keycloakAlbSg.securityGroupId,
+      ipProtocol: 'tcp',
+      fromPort: 80,
+      toPort: 80,
+      sourceSecurityGroupId: authService.securityGroup.securityGroupId,
+      description: 'Keycloak ALB ingress from auth server ECS tasks (HTTP)',
     });
 
     // ==================================================================

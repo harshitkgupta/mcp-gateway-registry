@@ -20,6 +20,7 @@ import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
@@ -38,6 +39,8 @@ export interface KeycloakServiceProps {
   readonly keycloakDbSg: ec2.ISecurityGroup;
   /** KMS key used for RDS / SSM encryption from the data stack */
   readonly rdsKmsKey: kms.IKey;
+  /** ARN of the Secrets Manager secret containing Keycloak DB credentials (username, password) */
+  readonly keycloakDbSecretArn: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +72,10 @@ export class KeycloakService extends Construct {
   constructor(scope: Construct, id: string, props: KeycloakServiceProps) {
     super(scope, id);
 
-    const { config, vpc, privateSubnets, publicSubnets, keycloakDbSg, rdsKmsKey } = props;
+    const { config, vpc, privateSubnets, publicSubnets, keycloakDbSg, rdsKmsKey, keycloakDbSecretArn } = props;
+
+    // Import the DB secret by ARN to avoid cross-stack cyclic dependency
+    const keycloakDbSecret = secretsmanager.Secret.fromSecretCompleteArn(this, 'ImportedDbSecret', keycloakDbSecretArn);
     const region = config.awsRegion;
 
     // ------------------------------------------------------------------
@@ -235,7 +241,8 @@ export class KeycloakService extends Construct {
       });
     }
 
-    // Build ARNs for all five Keycloak SSM parameters (2 admin + 3 database)
+    // Build ARNs for Keycloak SSM parameters (admin creds + DB URL)
+    // DB username/password now come from Secrets Manager (rotation-safe)
     const ssmParamArns = [
       cdk.Stack.of(this).formatArn({
         service: 'ssm',
@@ -251,16 +258,6 @@ export class KeycloakService extends Construct {
         service: 'ssm',
         resource: 'parameter',
         resourceName: 'keycloak/database/url',
-      }),
-      cdk.Stack.of(this).formatArn({
-        service: 'ssm',
-        resource: 'parameter',
-        resourceName: 'keycloak/database/username',
-      }),
-      cdk.Stack.of(this).formatArn({
-        service: 'ssm',
-        resource: 'parameter',
-        resourceName: 'keycloak/database/password',
       }),
     ];
 
@@ -290,6 +287,14 @@ export class KeycloakService extends Construct {
       effect: iam.Effect.ALLOW,
       actions: ['kms:Decrypt'],
       resources: ['*'],
+    }));
+
+    // Inline policy: read Keycloak DB credentials from Secrets Manager
+    taskExecRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SecretsManagerGetDbCreds',
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [keycloakDbSecretArn],
     }));
 
     // Inline policy: CloudWatch logs
@@ -362,11 +367,18 @@ export class KeycloakService extends Construct {
       );
     }
 
-    // ALB egress: port 8080 to ECS SG
+    // ALB egress: port 8080 to ECS SG (application traffic)
     this.albSg.addEgressRule(
       this.ecsSg,
       ec2.Port.tcp(8080),
       'Egress from load balancer to Keycloak ECS task',
+    );
+
+    // ALB egress: port 9000 to ECS SG (management port - metrics, health)
+    this.albSg.addEgressRule(
+      this.ecsSg,
+      ec2.Port.tcp(9000),
+      'Egress from load balancer to Keycloak management port',
     );
 
     // --- ECS SG Rules ---
@@ -392,11 +404,18 @@ export class KeycloakService extends Construct {
       'Egress from Keycloak ECS task to database',
     );
 
-    // ECS ingress: port 8080 from ALB SG
+    // ECS ingress: port 8080 from ALB SG (application traffic)
     this.ecsSg.addIngressRule(
       this.albSg,
       ec2.Port.tcp(8080),
       'Ingress from load balancer to Keycloak ECS task',
+    );
+
+    // ECS ingress: port 9000 from ALB SG (health checks on management port)
+    this.ecsSg.addIngressRule(
+      this.albSg,
+      ec2.Port.tcp(9000),
+      'Ingress from load balancer to Keycloak management port for health checks',
     );
 
     // CfnSecurityGroupIngress avoids cross-stack cyclic dependency
@@ -488,17 +507,17 @@ export class KeycloakService extends Construct {
     const container = taskDef.addContainer('keycloak', {
       containerName: 'keycloak',
       image: containerImage,
-      command: ['start-dev'],
+      command: [
+        'start-dev',
+        '--spi-realm-default-ssl-required=NONE',
+      ],
       essential: true,
       environment: {
         AWS_REGION: region,
         KC_DB: 'mysql',
-        KC_PROXY: 'edge',
-        KC_PROXY_ADDRESS_FORWARDING: 'true',
-        KC_HOSTNAME_URL: this.keycloakUrl,
-        KC_HOSTNAME_ADMIN_URL: this.keycloakUrl,
-        KC_HOSTNAME_STRICT: 'false',
-        KC_HOSTNAME_STRICT_HTTPS: config.enableRoute53Dns ? 'true' : 'false',
+        KC_PROXY_HEADERS: 'xforwarded',
+        KC_HOSTNAME: this.keycloakUrl,
+        KC_HOSTNAME_ADMIN: this.keycloakUrl,
         KC_HTTP_ENABLED: 'true',
         KC_HEALTH_ENABLED: 'true',
         KC_METRICS_ENABLED: 'true',
@@ -520,16 +539,8 @@ export class KeycloakService extends Construct {
             parameterName: '/keycloak/database/url',
           }),
         ),
-        KC_DB_USERNAME: ecs.Secret.fromSsmParameter(
-          ssm.StringParameter.fromSecureStringParameterAttributes(this, 'SsmRefDbUser', {
-            parameterName: '/keycloak/database/username',
-          }),
-        ),
-        KC_DB_PASSWORD: ecs.Secret.fromSsmParameter(
-          ssm.StringParameter.fromSecureStringParameterAttributes(this, 'SsmRefDbPw', {
-            parameterName: '/keycloak/database/password',
-          }),
-        ),
+        KC_DB_USERNAME: ecs.Secret.fromSecretsManager(keycloakDbSecret, 'username'),
+        KC_DB_PASSWORD: ecs.Secret.fromSecretsManager(keycloakDbSecret, 'password'),
       },
       logging: ecs.LogDrivers.awsLogs({
         logGroup,
@@ -582,6 +593,7 @@ export class KeycloakService extends Construct {
         timeout: cdk.Duration.seconds(5),
         interval: cdk.Duration.seconds(30),
         path: '/',
+        port: '8080',
         healthyHttpCodes: '200-399',
         protocol: elbv2.Protocol.HTTP,
       },
@@ -673,6 +685,7 @@ export class KeycloakService extends Construct {
       assignPublicIp: false,
       vpcSubnets: { subnets: privateSubnets },
       securityGroups: [this.ecsSg],
+      enableExecuteCommand: true,
       circuitBreaker: { enable: true, rollback: true },
     });
 

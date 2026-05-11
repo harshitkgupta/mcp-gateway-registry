@@ -340,10 +340,12 @@ export class RegistryDataStack extends cdk.Stack {
     // SSM parameters for Keycloak DB (SecureString via L1)
     // ------------------------------------------------------------------
 
+    // Use RDS Proxy endpoint so Keycloak survives password rotation without restart.
+    // The Proxy reads creds from SM and re-authenticates to Aurora transparently.
     const keycloakDbUrl = cdk.Fn.join('', [
       'jdbc:mysql://',
-      this.keycloakDbCluster.attrEndpointAddress,
-      ':3306/keycloak',
+      this.keycloakDbProxy.attrEndpoint,
+      ':3306/keycloak?allowPublicKeyRetrieval=true&useSSL=false',
     ]);
 
     const ssmParamArns = [
@@ -358,14 +360,14 @@ export class RegistryDataStack extends cdk.Stack {
       resources: ssmParamArns,
     });
 
+    // Only DB URL goes to SSM; username/password come from Secrets Manager
+    // so they stay in sync with rotation
     const keycloakSsmParams: Array<{ id: string; name: string; value: string }> = [
       { id: 'KeycloakDbUrlParam', name: '/keycloak/database/url', value: keycloakDbUrl },
-      { id: 'KeycloakDbUsernameParam', name: '/keycloak/database/username', value: config.keycloak.databaseUsername },
-      { id: 'KeycloakDbPasswordParam', name: '/keycloak/database/password', value: config.keycloak.databasePassword },
     ];
 
     for (const param of keycloakSsmParams) {
-      new cr.AwsCustomResource(this, param.id, {
+      const ssmCr = new cr.AwsCustomResource(this, param.id, {
         onCreate: {
           service: 'SSM',
           action: 'putParameter',
@@ -397,6 +399,9 @@ export class RegistryDataStack extends cdk.Stack {
         },
         policy: cr.AwsCustomResourcePolicy.fromStatements([ssmPutPolicy, ssmKmsActions]),
       });
+      // SSM params must be written only after the Aurora cluster succeeds,
+      // so a rollback of the cluster also prevents stale SSM values.
+      ssmCr.node.addDependency(keycloakInstance);
     }
 
     // ------------------------------------------------------------------

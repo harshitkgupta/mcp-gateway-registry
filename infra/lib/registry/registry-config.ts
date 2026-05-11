@@ -684,5 +684,23 @@ export function loadRegistryConfig(configPath: string): RegistryConfig {
   // Inject secrets from environment variables (overrides YAML values)
   _injectSecrets(config);
 
+  // Validate required secrets at synth time to fail fast
+  if (config.enabled) {
+    const requiredSecrets: Array<[string, string]> = [
+      [config.keycloak.adminPassword, 'CDK_KEYCLOAK_ADMIN_PASSWORD'],
+      [config.keycloak.databasePassword, 'CDK_KEYCLOAK_DATABASE_PASSWORD'],
+      [config.documentdb.adminPassword, 'CDK_DOCUMENTDB_ADMIN_PASSWORD'],
+    ];
+    const missing = requiredSecrets
+      .filter(([val]) => !val || val.length < 8)
+      .map(([, name]) => name);
+    if (missing.length > 0) {
+      throw new Error(
+        `Required secrets missing or too short (min 8 chars): ${missing.join(', ')}. ` +
+        'Set them as environment variables before running cdk synth/deploy.',
+      );
+    }
+  }
+
   return config;
 }

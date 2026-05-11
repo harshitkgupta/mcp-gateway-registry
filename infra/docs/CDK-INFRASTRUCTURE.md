@@ -302,8 +302,9 @@ registry:
   baseDomain: mycorp.click
   certificateArn: ""
 
-  # Storage
-  storageBackend: file            # 'file' or 'documentdb'
+  # Storage (MUST be 'documentdb' for ECS deployments - file backend uses a
+  # hardcoded path that doesn't exist in the container image)
+  storageBackend: documentdb      # 'file' or 'documentdb'
 
   # Deployment
   deploymentMode: with-gateway    # 'with-gateway' or 'registry-only'
@@ -551,6 +552,15 @@ npx cdk deploy --all --region us-east-1 --require-approval never
 ```
 
 Estimated time: ~20-40 minutes (DocumentDB and Aurora cluster creation take the longest).
+
+**After CDK deploy completes, run the post-deploy script** to configure Keycloak, load scopes, and wire up secrets:
+
+```bash
+export CDK_KEYCLOAK_ADMIN_PASSWORD="<your-password>"
+./infra/scripts/post-deploy.sh
+```
+
+See [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) for full details on the post-deploy steps and agent registration.
 
 ### Deploy Stacks Individually (Recommended for First Deployment)
 

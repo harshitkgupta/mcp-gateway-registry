@@ -38,6 +38,8 @@ export interface RegistryAuthStackProps extends cdk.StackProps {
   readonly keycloakDbSg: ec2.ISecurityGroup;
   /** KMS key used for RDS / SSM encryption from the data stack */
   readonly rdsKmsKey: kms.IKey;
+  /** ARN of the Secrets Manager secret containing Keycloak DB credentials */
+  readonly keycloakDbSecretArn: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +85,7 @@ export class RegistryAuthStack extends cdk.Stack {
       publicSubnets: props.publicSubnets,
       keycloakDbSg: props.keycloakDbSg,
       rdsKmsKey: props.rdsKmsKey,
+      keycloakDbSecretArn: props.keycloakDbSecretArn,
     });
 
     // ------------------------------------------------------------------

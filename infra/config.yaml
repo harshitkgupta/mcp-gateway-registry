@@ -44,7 +44,7 @@ registry:
   # certificateArn: ""
 
   # Storage
-  storageBackend: file
+  storageBackend: documentdb
 
   # Deployment
   deploymentMode: with-gateway
@@ -173,7 +173,7 @@ registry:
 
   # Session
   session:
-    cookieSecure: true
+    cookieSecure: false
     cookieDomain: ""
     oauthStoreTokensInSession: false
 

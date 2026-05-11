@@ -17,3 +17,8 @@ node_modules/
 
 # OS
 .DS_Store
+
+# Secrets / env files
+set-env.sh
+scripts/set-env.sh
+cdk-outputs.json

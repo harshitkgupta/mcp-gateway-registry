@@ -58,11 +58,27 @@ if (config.enabled) {
     publicSubnets: networkStack.publicSubnets,
     keycloakDbSg: dataStack.keycloakDbSg,
     rdsKmsKey: dataStack.rdsKmsKey,
+    keycloakDbSecretArn: dataStack.keycloakDbSecret.secretArn,
     env,
     description: 'MCP Gateway Registry - Keycloak ECS + ALB + DNS',
   });
   authStack.addDependency(networkStack);
   authStack.addDependency(dataStack);
+
+  // Ops must deploy before Auth so that secret rotation completes before
+  // Keycloak starts — Keycloak reads DB creds from Secrets Manager and the
+  // rotation Lambda updates both SM and Aurora on first deploy.
+  const opsStack = new RegistryOpsStack(app, 'Registry-Ops', {
+    config,
+    networkStack,
+    dataStack,
+    env,
+    description: 'MCP Gateway Registry - Secret rotation Lambdas for DocumentDB and RDS',
+  });
+  opsStack.addDependency(networkStack);
+  opsStack.addDependency(dataStack);
+
+  authStack.addDependency(opsStack);
 
   const serviceStack = new RegistryServiceStack(app, 'Registry-Service', {
     config,
@@ -75,16 +91,6 @@ if (config.enabled) {
   serviceStack.addDependency(networkStack);
   serviceStack.addDependency(dataStack);
   serviceStack.addDependency(authStack);
-
-  const opsStack = new RegistryOpsStack(app, 'Registry-Ops', {
-    config,
-    networkStack,
-    dataStack,
-    env,
-    description: 'MCP Gateway Registry - Secret rotation Lambdas for DocumentDB and RDS',
-  });
-  opsStack.addDependency(networkStack);
-  opsStack.addDependency(dataStack);
 
   const cdnStack = new RegistryCdnStack(app, 'Registry-Cdn', {
     config,

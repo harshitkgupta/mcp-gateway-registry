@@ -83,6 +83,11 @@ _check_prerequisites() {
     missing=1
   fi
 
+  if ! command -v jq &> /dev/null; then
+    _log_error "jq not found. Install: https://stedolan.github.io/jq/download/"
+    missing=1
+  fi
+
   if [ "$missing" -eq 1 ]; then
     exit 1
   fi
@@ -186,6 +191,28 @@ _check_secrets() {
   done
 }
 
+_bootstrap_cdk() {
+  local account
+  account=$(aws sts get-caller-identity --region "$AWS_REGION" --query 'Account' --output text)
+
+  # Check if CDKToolkit stack exists
+  local bootstrap_status
+  bootstrap_status=$(aws cloudformation describe-stacks \
+    --region "$AWS_REGION" \
+    --stack-name CDKToolkit \
+    --query 'Stacks[0].StackStatus' \
+    --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+
+  if [ "$bootstrap_status" = "DOES_NOT_EXIST" ]; then
+    _log_info "Bootstrapping CDK in account $account / region $AWS_REGION..."
+    cd "$INFRA_DIR"
+    npx cdk bootstrap "aws://${account}/${AWS_REGION}"
+    _log_success "CDK bootstrapped"
+  else
+    _log_info "CDK already bootstrapped (CDKToolkit: $bootstrap_status)"
+  fi
+}
+
 _install_deps() {
   cd "$INFRA_DIR"
   if [ ! -d "node_modules" ]; then
@@ -218,6 +245,7 @@ _show_status() {
 _deploy_all() {
   _check_secrets
   _install_deps
+  _bootstrap_cdk
   _build
 
   _log_info "Synthesizing CloudFormation templates..."
@@ -250,13 +278,22 @@ _deploy_all() {
     _log_info "Stack outputs saved to: infra/cdk-outputs.json"
   fi
 
-  _show_endpoints
+  # Run post-deploy automation (Keycloak init, secrets, service restart, validation)
+  local post_deploy_script="$SCRIPT_DIR/post-deploy.sh"
+  if [ -f "$post_deploy_script" ]; then
+    _log_info "Running post-deploy automation..."
+    bash "$post_deploy_script"
+  else
+    _log_warn "post-deploy.sh not found, skipping post-deploy automation"
+    _show_endpoints
+  fi
 }
 
 _deploy_stack() {
   local stack_name="$1"
   _check_secrets
   _install_deps
+  _bootstrap_cdk
   _build
 
   _log_info "Deploying $stack_name..."
