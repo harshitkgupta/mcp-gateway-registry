@@ -14,45 +14,39 @@ Use this skill when the user wants to create release notes for a new version. Th
 ## Input
 
 The skill takes a version tag as input:
-- Format: `v{major}.{minor}.{patch}` (e.g., `v1.0.16`)
-- The user may also provide the version without the `v` prefix (e.g., `1.0.16`) -- always normalize to `v`-prefixed format
+- Format: `{major}.{minor}.{patch}` (e.g., `1.24.0`) - **no `v` prefix**, semver only
+- Older releases (pre-`1.23.0`) used a `v` prefix (e.g., `v1.0.22`) - existing artifacts under `release-notes/v*.md` and tags `v1.0.x` are preserved as-is, but **new releases must use the bare-semver convention**
+- If the user provides a `v`-prefixed version for a new release, strip the prefix and confirm
 
 ## Output
 
 Creates a release notes file in `release-notes/` and tags the repo:
-- `release-notes/v{version}.md` - Release notes markdown file
-- Git tag `v{version}` pointing to the commit that includes the release notes
+- `release-notes/{version}.md` - Release notes markdown file (e.g., `release-notes/1.24.0.md`)
+- Git tag `{version}` pointing to the commit that includes the release notes
 
 ## Workflow
 
 ### Step 1: Determine the New Version Tag
 
 1. Parse the version from user input. If not provided, ask the user what version to release.
-2. Normalize to `v`-prefixed format (e.g., `1.0.16` becomes `v1.0.16`).
-3. Verify the tag does not already exist: `git tag -l v{version}`.
+2. Normalize to **bare semver** format (e.g., `v1.24.0` becomes `1.24.0`). Never prepend `v` for new releases.
+3. Verify the tag does not already exist: `git tag -l {version}`.
 4. If it exists, ask the user if they want to move it or choose a different version.
 
 ### Step 2: Determine the Base Version (Ask User to Confirm)
 
 The release notes are incremental from a previous version. Determine the base version:
 
-1. List existing release notes files:
+1. List existing release notes files (covers both old `v`-prefixed and new bare-semver names):
    ```bash
-   ls release-notes/v*.md
+   ls release-notes/*.md
    ```
-2. List existing git tags (version tags only):
+2. List existing git tags (any version-shaped tag, prefixed or bare):
    ```bash
-   git tag --sort=-v:refname | grep '^v[0-9]'
+   git tag --sort=-v:refname | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+'
    ```
-3. Find the most recent release notes file and the most recent git tag. Present these to the user:
-   ```
-   Found release notes: v1.0.15, v1.0.14, v1.0.13, ...
-   Found git tags: v1.0.15, v1.0.13, v1.0.12, ...
-
-   This release (v1.0.16) appears to be incremental from v1.0.15.
-   Confirm base version, or specify a different one if you want to skip versions.
-   ```
-4. **Ask the user to confirm the base version** using AskUserQuestion. Present the most recent tag as the recommended option and the 2-3 previous tags as alternatives. The user may want to skip intermediate tags (e.g., diff from v1.0.13 to v1.0.16, skipping v1.0.14 and v1.0.15).
+3. Find the most recent tag. Note that the project switched from `v`-prefixed (`v1.0.22`) to bare-semver (`1.23.0`, `1.24.0`) - the most recent bare-semver tag is the right base for a new release.
+4. **Ask the user to confirm the base version** using AskUserQuestion. Present the most recent tag as the recommended option and the 2-3 previous tags as alternatives. The user may want to skip intermediate tags (e.g., diff from `1.23.0` to `1.25.0`, skipping `1.24.0`).
 
 ### Step 3: Gather All Changes Between Base and HEAD
 
@@ -80,8 +74,20 @@ git diff {base_tag}..HEAD -- charts/ --stat
 # Helm chart dependency changes (breaking change indicator)
 git diff {base_tag}..HEAD -- charts/registry/Chart.yaml charts/auth-server/Chart.yaml charts/mcp-gateway-registry-stack/Chart.yaml
 
-# Recently closed issues
-gh issue list --state closed --limit 50 --json number,title,closedAt --jq '.[] | "\(.number) | \(.title) | \(.closedAt)"'
+# Closed issues since the base tag was cut
+# Use the base tag's date as the floor; gh issue list does not natively
+# support "closed-since-tag", so we filter by closedAt timestamp.
+BASE_TAG_DATE=$(git log -1 --format=%cI {base_tag})
+gh issue list --state closed --limit 200 --json number,title,closedAt,labels \
+  --jq ".[] | select(.closedAt >= \"$BASE_TAG_DATE\") | \"\(.number) | \(.title) | \(.closedAt)\""
+
+# Closed issues referenced by merged PRs in this release (most reliable mapping)
+# For each PR number, the PR body usually has "Closes #N" or "Fixes #N" -- gh
+# resolves these via the closingIssuesReferences field.
+for pr in $(git log {base_tag}..HEAD --oneline --grep="Merge pull request" | grep -oE "#[0-9]+" | tr -d '#' | sort -u); do
+  gh pr view $pr --json number,title,closingIssuesReferences \
+    --jq '"\(.number) | \(.title) | closes: \(.closingIssuesReferences | map("#\(.number)") | join(","))"' 2>/dev/null
+done
 ```
 
 ### Step 4: Categorize Changes
@@ -109,22 +115,29 @@ Analyze all commits and PRs to categorize them:
 
 8. **Documentation**: Commits with `docs:` prefix.
 
-9. **Contributors**: Unique contributor list from git log.
+9. **Closed Issues**: Issues closed in the release window. Build from the
+   `closingIssuesReferences` of every merged PR in this release (most reliable -
+   GitHub auto-closes issues referenced by `Closes #N` / `Fixes #N` in PR
+   bodies), and supplement with manually-closed issues whose `closedAt` is
+   between the base-tag commit date and HEAD. De-duplicate by issue number.
+
+10. **Contributors**: Unique contributor list from git log.
 
 ### Step 5: Write Release Notes
 
-Create the file `release-notes/v{version}.md` following this exact structure:
+Create the file `release-notes/{version}.md` following this exact structure
+(note: bare semver, no `v` prefix, e.g. `release-notes/1.24.0.md`):
 
 ```markdown
-# Release v{version} - {Short Title Summarizing Major Features}
+# Release {version} - {Short Title Summarizing Major Features}
 
 **{Month} {Year}**
 
 ---
 
-## Upgrading from v{base_version}
+## Upgrading from {base_version}
 
-This section covers everything you need to know to upgrade from v{base_version} to v{version}.
+This section covers everything you need to know to upgrade from {base_version} to {version}.
 
 ### Breaking Changes
 
@@ -146,7 +159,7 @@ If no breaking changes, write: "There are no breaking changes in this release."}
 ```bash
 cd mcp-gateway-registry
 git pull origin main
-git checkout v{version}
+git checkout {version}
 
 # Review new env vars in .env.example and update your .env if needed
 # Then rebuild and restart:
@@ -158,7 +171,7 @@ git checkout v{version}
 ```bash
 cd mcp-gateway-registry
 git pull origin main
-git checkout v{version}
+git checkout {version}
 
 # {If helm dependency changes: "REQUIRED: Rebuild dependencies"}
 cd charts/mcp-gateway-registry-stack
@@ -178,7 +191,7 @@ show the helm upgrade command.}
 ```bash
 cd mcp-gateway-registry
 git pull origin main
-git checkout v{version}
+git checkout {version}
 
 # Update your .tfvars with any new variables
 cd terraform/aws-ecs
@@ -191,13 +204,13 @@ terraform apply
 Pre-built images are available:
 
 ```bash
-docker pull mcpgateway/registry:v{version}
-docker pull mcpgateway/auth-server:v{version}
-docker pull mcpgateway/currenttime-server:v{version}
-docker pull mcpgateway/realserverfaketools-server:v{version}
-docker pull mcpgateway/mcpgw-server:v{version}
-docker pull mcpgateway/fininfo-server:v{version}
-docker pull mcpgateway/metrics-service:v{version}
+docker pull mcpgateway/registry:{version}
+docker pull mcpgateway/auth-server:{version}
+docker pull mcpgateway/currenttime-server:{version}
+docker pull mcpgateway/realserverfaketools-server:{version}
+docker pull mcpgateway/mcpgw-server:{version}
+docker pull mcpgateway/fininfo-server:{version}
+docker pull mcpgateway/metrics-service:{version}
 ```
 
 ---
@@ -232,6 +245,20 @@ Only include categories that have changes.}
 
 - {Bug fix description} (#{pr_number})
 - {Bug fix description} (#{pr_number})
+
+---
+
+## Closed Issues
+
+| Issue | Title | Closed By |
+|-------|-------|-----------|
+| #{issue_number} | {issue_title} | {PR #{pr_number} or "manual"} |
+
+{List all issues closed in the release window, sorted by issue number
+descending. "Closed By" is the PR that closed the issue (via
+`closingIssuesReferences`) or "manual" for issues closed without a PR
+reference. If no issues were closed in this window, write:
+"No issues were closed in this release window."}
 
 ---
 
@@ -274,18 +301,19 @@ Map known email addresses to GitHub usernames where possible.}
 
 ---
 
-**Full Changelog:** [v{base_version}...v{version}](https://github.com/agentic-community/mcp-gateway-registry/compare/v{base_version}...v{version})
+**Full Changelog:** [{base_version}...{version}](https://github.com/agentic-community/mcp-gateway-registry/compare/{base_version}...{version})
 ```
 
 ### Step 6: Present Draft for User Review
 
 After writing the release notes file:
 
-1. Tell the user the file has been created at `release-notes/v{version}.md`
+1. Tell the user the file has been created at `release-notes/{version}.md`
 2. Present a brief summary:
    - Number of major features
    - Number of PRs included
    - Number of bug fixes
+   - Number of closed issues
    - Any breaking changes
    - Contributor count
 3. Ask the user to review the file and confirm it looks good, or request changes
@@ -296,8 +324,8 @@ Once the user confirms the release notes are ready:
 
 1. **Commit the release notes:**
    ```bash
-   git add release-notes/v{version}.md
-   git commit -m "docs: Add v{version} release notes"
+   git add release-notes/{version}.md
+   git commit -m "docs: Add {version} release notes"
    ```
 
 2. **Push the commit:**
@@ -308,26 +336,26 @@ Once the user confirms the release notes are ready:
 3. **Create or move the git tag** to point at this latest commit (which includes the release notes):
    ```bash
    # If tag already exists, delete it locally and remotely first
-   git tag -d v{version} 2>/dev/null || true
-   git push origin :refs/tags/v{version} 2>/dev/null || true
+   git tag -d {version} 2>/dev/null || true
+   git push origin :refs/tags/{version} 2>/dev/null || true
 
-   # Create tag on current HEAD
-   git tag v{version}
+   # Create tag on current HEAD (bare semver, no v prefix)
+   git tag {version}
 
    # Push tag
-   git push origin v{version}
+   git push origin {version}
    ```
 
 4. **Verify:**
    ```bash
    git log --oneline -1
-   git tag -l v{version} --format="%(refname:short) -> %(objectname:short)"
+   git tag -l {version} --format="%(refname:short) -> %(objectname:short)"
    ```
 
 5. Tell the user the tag is created and pushed, and provide the DockerHub push command:
    ```
    To publish images to DockerHub with this tag:
-   make publish-dockerhub-version VERSION=v{version}
+   make publish-dockerhub-version VERSION={version}
    ```
 
 ## Important Rules
