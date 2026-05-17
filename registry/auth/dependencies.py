@@ -9,6 +9,7 @@ from .access_resolver import (
     get_user_accessible_tools,  # noqa: F401 - re-exported for external callers
     resolve_scope_access,
 )
+from .session_store import resolve_session as _store_resolve_session
 
 logger = logging.getLogger(__name__)
 
@@ -16,102 +17,82 @@ logger = logging.getLogger(__name__)
 signer = URLSafeTimedSerializer(settings.secret_key)
 
 
-def get_current_user(
+async def resolve_session_from_cookie(
+    cookie_value: str | None,
+) -> dict[str, Any] | None:
+    """Resolve a session cookie to its server-side record.
+
+    Returns None for any non-recoverable failure: missing cookie, bad
+    signature, expired signature, legacy dict-payload (pre-server-side
+    rollout — forces re-login), or store unavailable. Callers must translate
+    None into 401, never into 500.
+    """
+    if not cookie_value:
+        return None
+
+    try:
+        payload = signer.loads(cookie_value, max_age=settings.session_max_age_seconds)
+    except SignatureExpired:
+        logger.debug("Session cookie has expired")
+        return None
+    except BadSignature:
+        logger.debug("Session cookie has invalid signature")
+        return None
+    except Exception as e:
+        logger.warning(f"Unexpected error decoding session cookie: {e}")
+        return None
+
+    # Legacy cookies signed before this rollout carried a dict payload. With
+    # the server-side store, the cookie holds only an opaque session_id
+    # string. Anything else is a stale cookie and the user must re-login.
+    if not isinstance(payload, str):
+        logger.debug("Legacy session cookie format detected; forcing re-login")
+        return None
+
+    return await _store_resolve_session(payload)
+
+
+async def get_current_user(
     session: Annotated[str | None, Cookie(alias=settings.session_cookie_name)] = None,
 ) -> str:
-    """
-    Get the current authenticated user from session cookie.
+    """Get the username for the authenticated user.
 
-    Returns:
-        str: Username of the authenticated user
-
-    Raises:
-        HTTPException: If user is not authenticated
+    Raises 401 for missing, tampered, expired, or legacy-format cookies.
     """
-    if not session:
-        logger.warning("No session cookie provided")
+    data = await resolve_session_from_cookie(session)
+    if data is None or not data.get("username"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
         )
-
-    try:
-        data = signer.loads(session, max_age=settings.session_max_age_seconds)
-        username = data.get("username")
-
-        if not username:
-            logger.warning("No username found in session data")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session data"
-            )
-
-        logger.debug(f"Authentication successful for user: {username}")
-        return username
-
-    except SignatureExpired:
-        logger.warning("Session cookie has expired")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has expired")
-    except BadSignature:
-        logger.warning("Invalid session cookie signature")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
-    except Exception as e:
-        logger.error(f"Session validation error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication failed"
-        )
+    return data["username"]
 
 
-def get_user_session_data(
+async def get_user_session_data(
     session: Annotated[str | None, Cookie(alias=settings.session_cookie_name)] = None,
 ) -> dict[str, Any]:
-    """
-    Get the full session data for the authenticated user.
+    """Get the full session record for the authenticated user.
 
-    Returns:
-        Dict containing username, groups, auth_method, provider, etc.
-
-    Raises:
-        HTTPException: If user is not authenticated
+    The record contains username, email, name, groups, provider, auth_method,
+    and id_token (always, when the IdP returned one). Loaded from the
+    server-side session store via the opaque session_id in the signed cookie.
     """
-    if not session:
-        logger.warning("No session cookie provided for session data extraction")
+    data = await resolve_session_from_cookie(session)
+    if data is None or not data.get("username"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
         )
 
-    try:
-        data = signer.loads(session, max_age=settings.session_max_age_seconds)
-
-        if not data.get("username"):
-            logger.warning("No username found in session data")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session data"
-            )
-
-        # All sessions must be OAuth2 - reject legacy "traditional" sessions
-        if data.get("auth_method") != "oauth2":
-            logger.warning(
-                f"Rejecting non-OAuth2 session for user {data.get('username')} "
-                f"(auth_method={data.get('auth_method')}). Please re-login via OAuth2."
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Session expired. Please login again via OAuth2.",
-            )
-
-        logger.debug(f"Session data extracted for user: {data.get('username')}")
-        return data
-
-    except SignatureExpired:
-        logger.warning("Session cookie has expired")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has expired")
-    except BadSignature:
-        logger.warning("Invalid session cookie signature")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
-    except Exception as e:
-        logger.error(f"Session data extraction error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication failed"
+    if data.get("auth_method") != "oauth2":
+        logger.warning(
+            f"Rejecting non-OAuth2 session for user {data.get('username')} "
+            f"(auth_method={data.get('auth_method')}). Please re-login via OAuth2."
         )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please login again via OAuth2.",
+        )
+
+    return data
 
 
 # Global scopes configuration - will be loaded during app startup
@@ -455,24 +436,86 @@ async def user_can_access_server(server_name: str, user_scopes: list[str]) -> bo
     return server_name in accessible_servers
 
 
-def api_auth(
+async def api_auth(
     session: Annotated[str | None, Cookie(alias=settings.session_cookie_name)] = None,
 ) -> str:
-    """
-    API authentication dependency that returns the username.
-    Used for API endpoints that need authentication.
-    """
-    return get_current_user(session)
+    """API authentication dependency that returns the username."""
+    return await get_current_user(session)
 
 
-def web_auth(
+async def web_auth(
     session: Annotated[str | None, Cookie(alias=settings.session_cookie_name)] = None,
 ) -> str:
+    """Web authentication dependency that returns the username."""
+    return await get_current_user(session)
+
+
+async def _derive_user_context(
+    *,
+    username: str,
+    groups: list[str],
+    scopes: list[str],
+    auth_method: str,
+    provider: str,
+    session_id: str | None = None,
+    client_id: str = "",
+) -> dict[str, Any]:
+    """Build the canonical user_context dict from authenticated identity inputs.
+
+    Single source of truth for scope→ui_permissions→is_admin derivation. Both
+    `enhanced_auth` (cookie path) and `nginx_proxied_auth` (header path) call
+    this so a given (groups, scopes, auth_method) tuple produces the same
+    authorization result regardless of how the user was authenticated.
+
+    The two callers differ only in how they obtain `scopes`: the cookie path
+    derives scopes from `groups` via `map_cognito_groups_to_scopes`; the
+    header path uses pre-computed scopes forwarded from the auth_server in
+    `X-Scopes`. Both should equal each other for the same user — see #933.
+
+    `auth_method == "federation-static"` short-circuits to a no-access
+    context (federation static tokens get scoped access via separate routing,
+    not registry-side derivation).
     """
-    Web authentication dependency that returns the username.
-    Used for web pages that need authentication.
-    """
-    return get_current_user(session)
+    if auth_method == "federation-static":
+        return {
+            "username": username,
+            "client_id": client_id,
+            "groups": groups,
+            "scopes": scopes,
+            "auth_method": auth_method,
+            "provider": provider,
+            "session_id": session_id,
+            "accessible_servers": [],
+            "accessible_tools": {},
+            "accessible_services": [],
+            "accessible_agents": [],
+            "ui_permissions": {},
+            "can_modify_servers": False,
+            "is_admin": False,
+        }
+
+    # Resolve servers + tools in a single scope-repo pass (Issue #1026).
+    access = await resolve_scope_access(scopes)
+    ui_permissions = await get_ui_permissions_for_user(scopes)
+
+    return {
+        "username": username,
+        "client_id": client_id,
+        "groups": groups,
+        "scopes": scopes,
+        "auth_method": auth_method,
+        "provider": provider,
+        # session_id is the opaque server-side identifier — used by template
+        # callers to mint CSRF tokens via generate_csrf_token(session_id).
+        "session_id": session_id,
+        "accessible_servers": access.servers,
+        "accessible_tools": access.tools,
+        "accessible_services": get_accessible_services_for_user(ui_permissions),
+        "accessible_agents": get_accessible_agents_for_user(ui_permissions),
+        "ui_permissions": ui_permissions,
+        "can_modify_servers": user_can_modify_servers(groups, scopes),
+        "is_admin": _user_is_admin(ui_permissions),
+    }
 
 
 async def enhanced_auth(
@@ -484,7 +527,7 @@ async def enhanced_auth(
     Returns username, groups, scopes, and permission flags.
     Also sets request.state.user_context for audit logging middleware.
     """
-    session_data = get_user_session_data(session)
+    session_data = await get_user_session_data(session)
 
     username = session_data["username"]
     groups = session_data.get("groups", [])
@@ -500,36 +543,14 @@ async def enhanced_auth(
             f"OAuth2 user {username} has no groups! This user may not have proper group assignments."
         )
 
-    # Get UI permissions
-    ui_permissions = await get_ui_permissions_for_user(scopes)
-
-    # Resolve accessible servers + tools in one scope-repo pass (Issue #1026).
-    access = await resolve_scope_access(scopes)
-    accessible_servers = access.servers
-
-    # Get accessible services (from UI permissions)
-    accessible_services = get_accessible_services_for_user(ui_permissions)
-
-    # Get accessible agents (from UI permissions)
-    accessible_agents = get_accessible_agents_for_user(ui_permissions)
-
-    # Check modification permissions
-    can_modify = user_can_modify_servers(groups, scopes)
-
-    user_context = {
-        "username": username,
-        "groups": groups,
-        "scopes": scopes,
-        "auth_method": auth_method,
-        "provider": session_data.get("provider", "local"),
-        "accessible_servers": accessible_servers,
-        "accessible_tools": access.tools,
-        "accessible_services": accessible_services,
-        "accessible_agents": accessible_agents,
-        "ui_permissions": ui_permissions,
-        "can_modify_servers": can_modify,
-        "is_admin": _user_is_admin(ui_permissions),
-    }
+    user_context = await _derive_user_context(
+        username=username,
+        groups=groups,
+        scopes=scopes,
+        auth_method=auth_method,
+        provider=session_data.get("provider", "local"),
+        session_id=session_data.get("session_id"),
+    )
 
     # Set user context on request state for audit logging middleware
     request.state.user_context = user_context
@@ -593,81 +614,35 @@ async def nginx_proxied_auth(
         # Parse scopes from space-separated header
         scopes = x_scopes.split() if x_scopes else []
 
-        # Parse groups from X-Groups header (set by auth server from JWT claims)
+        # Parse groups from X-Groups header (set by auth server from JWT claims).
+        # If X-Groups is missing, groups stay empty: admin status is then
+        # derived purely from scope-based ui_permissions (which the auth_server
+        # already computed when it set X-Scopes). Synthesizing groups from a
+        # scope heuristic — the previous behavior — granted admin to non-admins
+        # via the proxied path while the cookie path correctly said non-admin
+        # for the same user (#933).
         groups = x_groups.split() if x_groups else []
-
-        # If auth server did not forward groups, fall back to admin/user classification
-        if not groups and x_auth_method in [
-            "keycloak",
-            "entra",
-            "cognito",
-            "okta",
-            "auth0",
-            "network-trusted",
-            "federation-static",
-        ]:
-            if (
-                "mcp-servers-unrestricted/read" in scopes
-                and "mcp-servers-unrestricted/execute" in scopes
-            ):
-                groups = ["mcp-registry-admin"]
-            else:
-                groups = ["mcp-registry-user"]
 
         logger.info(
             f"nginx-proxied auth for user: {username}, method: {x_auth_method}, "
             f"groups: {groups}, scopes: {scopes}"
         )
 
-        if x_auth_method == "federation-static":
-            # Federation static token: scoped access to federation/peer endpoints only
-            accessible_servers = []
-            accessible_tools: dict[str, set[str]] = {}
-            accessible_services = []
-            accessible_agents = []
-            ui_permissions = {}
-            can_modify = False
-            is_admin = False
-        else:
-            # Standard resolution for all auth methods including network-trusted
-            # (Issue #779: network-trusted now carries per-key scopes from the
-            # auth server instead of hard-coded admin).
-            # Resolve servers + tools in a single scope-repo pass (Issue #1026).
-            access = await resolve_scope_access(scopes)
-            accessible_servers = access.servers
-            accessible_tools = access.tools
-
-            ui_permissions = await get_ui_permissions_for_user(scopes)
-
-            accessible_services = get_accessible_services_for_user(ui_permissions)
-
-            accessible_agents = get_accessible_agents_for_user(ui_permissions)
-
-            can_modify = user_can_modify_servers(groups, scopes)
-
-            is_admin = _user_is_admin(ui_permissions)
-
-        user_context = {
-            "username": username,
-            "client_id": x_client_id or "",
-            "groups": groups,
-            "scopes": scopes,
-            "auth_method": x_auth_method or "keycloak",
-            "provider": x_auth_method or "keycloak",  # Use actual auth method as provider
-            "accessible_servers": accessible_servers,
-            "accessible_tools": accessible_tools,
-            "accessible_services": accessible_services,
-            "accessible_agents": accessible_agents,
-            "ui_permissions": ui_permissions,
-            "can_modify_servers": can_modify,
-            "is_admin": is_admin,
-        }
+        user_context = await _derive_user_context(
+            username=username,
+            groups=groups,
+            scopes=scopes,
+            auth_method=x_auth_method or "keycloak",
+            provider=x_auth_method or "keycloak",
+            client_id=x_client_id or "",
+        )
 
         # Set user context on request state for audit logging middleware
         request.state.user_context = user_context
 
         logger.debug(
-            f"nginx-proxied auth context for {username} (is_admin={is_admin}): {user_context}"
+            f"nginx-proxied auth context for {username} "
+            f"(is_admin={user_context['is_admin']}): {user_context}"
         )
         return user_context
 
@@ -691,14 +666,6 @@ async def nginx_proxied_auth(
             f"[NGINX_AUTH_FALLBACK] enhanced_auth raised unexpected exception: {type(e).__name__}: {str(e)}"
         )
         raise
-
-
-def create_session_cookie(
-    username: str, auth_method: str = "oauth2", provider: str = "local"
-) -> str:
-    """Create a session cookie for a user."""
-    session_data = {"username": username, "auth_method": auth_method, "provider": provider}
-    return signer.dumps(session_data)
 
 
 def ui_permission_required(permission: str, service_name: str = None):

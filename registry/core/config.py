@@ -1,5 +1,4 @@
 import logging
-import secrets
 from datetime import UTC
 from enum import Enum
 from pathlib import Path
@@ -77,7 +76,6 @@ class Settings(BaseSettings):
     auth_server_url: str = "http://localhost:8888"
     auth_server_external_url: str = "http://localhost:8888"  # External URL for OAuth redirects
     auth_provider: str = "cognito"  # Auth provider: cognito, keycloak, entra, github
-    oauth_store_tokens_in_session: bool = False  # Store OAuth tokens in session cookies
     registry_static_token_auth_enabled: bool = False  # Enable static token auth (IdP-independent)
     registry_api_token: str = ""  # Static API token for registry access
     registry_api_keys: str = ""  # Multi-key static tokens JSON (Issue #779)
@@ -677,14 +675,10 @@ class Settings(BaseSettings):
         if v is None:
             return "json"
         if not isinstance(v, str):
-            raise ValueError(
-                f"APP_LOG_FILE_FORMAT must be a string, got {type(v).__name__}"
-            )
+            raise ValueError(f"APP_LOG_FILE_FORMAT must be a string, got {type(v).__name__}")
         normalized = v.strip().lower()
         if normalized not in ("json", "text"):
-            raise ValueError(
-                f"APP_LOG_FILE_FORMAT must be 'json' or 'text', got {v!r}"
-            )
+            raise ValueError(f"APP_LOG_FILE_FORMAT must be 'json' or 'text', got {v!r}")
         return normalized
 
     @field_validator("app_log_console_format", mode="before")
@@ -769,9 +763,12 @@ class Settings(BaseSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        # Generate secret key if not provided
         if not self.secret_key:
-            self.secret_key = secrets.token_hex(32)
+            raise RuntimeError(
+                "SECRET_KEY environment variable is required. "
+                "Set it to a value at least 32 bytes long, identical across all auth_server "
+                "and registry replicas (see chart values.yaml: global.secretKey)."
+            )
 
     @property
     def embeddings_model_dir(self) -> Path:

@@ -23,7 +23,6 @@ from itsdangerous import SignatureExpired, URLSafeTimedSerializer
 from registry.auth.dependencies import (
     _user_is_admin,
     api_auth,
-    create_session_cookie,
     enhanced_auth,
     get_accessible_agents_for_user,
     get_accessible_services_for_user,
@@ -63,6 +62,32 @@ def mock_signer(test_secret_key: str, monkeypatch):
     # Patch the module-level signer
     monkeypatch.setattr("registry.auth.dependencies.signer", signer)
     return signer
+
+
+@pytest.fixture
+def mock_session_store(monkeypatch):
+    """Mock the server-side session store lookup.
+
+    The test sets `mock_session_store.next_value = {...}` (or None) and any
+    `signer.dumps(<session_id>)` cookie passed through resolve_session_from_cookie
+    will resolve to that value, regardless of what session_id was used.
+    """
+
+    class _Stub:
+        next_value: dict | None = None
+
+    stub = _Stub()
+
+    async def _fake_resolve(session_id: str):
+        return stub.next_value
+
+    monkeypatch.setattr("registry.auth.dependencies._store_resolve_session", _fake_resolve)
+    return stub
+
+
+def _make_session_cookie(signer: URLSafeTimedSerializer, session_id: str = "sid-test") -> str:
+    """Helper: produce a signed opaque-session_id cookie matching the new format."""
+    return signer.dumps(session_id)
 
 
 @pytest.fixture
@@ -203,71 +228,75 @@ def mock_session_validator(test_secret_key: str):
 class TestGetCurrentUser:
     """Tests for get_current_user dependency."""
 
-    def test_get_current_user_with_valid_session(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_get_current_user_with_valid_session(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test extracting user from valid session cookie."""
-        # Arrange
-        session_data = {"username": "testuser"}
-        session_cookie = mock_signer.dumps(session_data)
+        mock_session_store.next_value = {"username": "testuser", "auth_method": "oauth2"}
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Act
-        username = get_current_user(session=session_cookie)
+        username = await get_current_user(session=session_cookie)
 
-        # Assert
         assert username == "testuser"
 
-    def test_get_current_user_no_session_cookie(self):
+    @pytest.mark.asyncio
+    async def test_get_current_user_no_session_cookie(self, mock_session_store):
         """Test that missing session cookie raises 401."""
-        # Act & Assert
         with pytest.raises(HTTPException) as exc_info:
-            get_current_user(session=None)
+            await get_current_user(session=None)
 
         assert exc_info.value.status_code == 401
         assert "Authentication required" in exc_info.value.detail
 
-    def test_get_current_user_expired_session(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_get_current_user_expired_session(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test that expired session raises 401."""
-        # Arrange
-        session_data = {"username": "testuser"}
-        session_cookie = mock_signer.dumps(session_data)
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Mock signature expired exception
+        # Force the cookie's signature check to report expiry — short-circuits
+        # before the store lookup.
         with patch.object(mock_signer, "loads", side_effect=SignatureExpired("Expired")):
-            # Act & Assert
             with pytest.raises(HTTPException) as exc_info:
-                get_current_user(session=session_cookie)
+                await get_current_user(session=session_cookie)
 
-            assert exc_info.value.status_code == 401
-            assert "expired" in exc_info.value.detail.lower()
+        assert exc_info.value.status_code == 401
 
-    def test_get_current_user_invalid_signature(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_get_current_user_invalid_signature(self, mock_session_store):
         """Test that invalid signature raises 401."""
-        # Arrange
-        invalid_session = "invalid.session.cookie"
-
-        # Act & Assert
         with pytest.raises(HTTPException) as exc_info:
-            get_current_user(session=invalid_session)
+            await get_current_user(session="invalid.session.cookie")
 
         assert exc_info.value.status_code == 401
-        assert "Invalid session" in exc_info.value.detail
 
-    def test_get_current_user_no_username_in_session(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_get_current_user_no_username_in_session(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test that session without username raises 401."""
-        # Arrange
-        session_data = {"other_field": "value"}
-        session_cookie = mock_signer.dumps(session_data)
+        # Store returns a hydrated record with no username.
+        mock_session_store.next_value = {"username": None, "auth_method": "oauth2"}
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Act & Assert
         with pytest.raises(HTTPException) as exc_info:
-            get_current_user(session=session_cookie)
+            await get_current_user(session=session_cookie)
 
         assert exc_info.value.status_code == 401
-        # Note: The actual message is "Authentication failed" due to exception handling
-        # in the code (the inner HTTPException is caught by outer except)
-        assert (
-            "Authentication failed" in exc_info.value.detail
-            or "Invalid session data" in exc_info.value.detail
-        )
+
+    @pytest.mark.asyncio
+    async def test_get_current_user_legacy_cookie_rejected(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
+        """Legacy dict-payload cookies must be rejected — forces re-login."""
+        legacy_cookie = mock_signer.dumps({"username": "testuser", "auth_method": "oauth2"})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_user(session=legacy_cookie)
+
+        assert exc_info.value.status_code == 401
 
 
 # =============================================================================
@@ -280,62 +309,59 @@ class TestGetCurrentUser:
 class TestGetUserSessionData:
     """Tests for get_user_session_data dependency."""
 
-    def test_get_session_data_traditional_user_rejected(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_get_session_data_traditional_user_rejected(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test that non-OAuth2 sessions are rejected."""
-        # Arrange
-        session_data = {
-            "username": "admin",
-            "auth_method": "traditional",
-        }
-        session_cookie = mock_signer.dumps(session_data)
+        mock_session_store.next_value = {"username": "admin", "auth_method": "traditional"}
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Act & Assert - traditional sessions should be rejected
         with pytest.raises(HTTPException) as exc_info:
-            get_user_session_data(session=session_cookie)
+            await get_user_session_data(session=session_cookie)
         assert exc_info.value.status_code == 401
 
-    def test_get_session_data_oauth2_user(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_get_session_data_oauth2_user(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test extracting session data for OAuth2 user."""
-        # Arrange
-        session_data = {
+        mock_session_store.next_value = {
             "username": "oauth_user",
             "auth_method": "oauth2",
             "groups": ["registry-users-lob1"],
             "provider": "cognito",
         }
-        session_cookie = mock_signer.dumps(session_data)
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Act
-        result = get_user_session_data(session=session_cookie)
+        result = await get_user_session_data(session=session_cookie)
 
-        # Assert
         assert result["username"] == "oauth_user"
         assert result["auth_method"] == "oauth2"
         assert result["groups"] == ["registry-users-lob1"]
-        # OAuth2 users don't get default admin privileges
         assert "scopes" not in result or "mcp-registry-admin" not in result.get("scopes", [])
 
-    def test_get_session_data_no_session(self):
+    @pytest.mark.asyncio
+    async def test_get_session_data_no_session(self, mock_session_store):
         """Test that missing session raises 401."""
-        # Act & Assert
         with pytest.raises(HTTPException) as exc_info:
-            get_user_session_data(session=None)
+            await get_user_session_data(session=None)
 
         assert exc_info.value.status_code == 401
         assert "Authentication required" in exc_info.value.detail
 
-    def test_get_session_data_expired(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_get_session_data_expired(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test that expired session raises 401."""
-        # Arrange
-        session_cookie = "some.session.cookie"
+        session_cookie = _make_session_cookie(mock_signer)
 
         with patch.object(mock_signer, "loads", side_effect=SignatureExpired("Expired")):
-            # Act & Assert
             with pytest.raises(HTTPException) as exc_info:
-                get_user_session_data(session=session_cookie)
+                await get_user_session_data(session=session_cookie)
 
-            assert exc_info.value.status_code == 401
-            assert "expired" in exc_info.value.detail.lower()
+        assert exc_info.value.status_code == 401
 
 
 # =============================================================================
@@ -951,46 +977,6 @@ class TestUserCanAccessServer:
 
 
 # =============================================================================
-# TEST: create_session_cookie
-# =============================================================================
-
-
-@pytest.mark.unit
-@pytest.mark.auth
-class TestCreateSessionCookie:
-    """Tests for create_session_cookie function."""
-
-    def test_create_default_session(self, mock_signer: URLSafeTimedSerializer):
-        """Test creating session cookie with default auth_method (oauth2)."""
-        # Act
-        session_cookie = create_session_cookie(
-            username="testuser",
-        )
-
-        # Assert
-        assert session_cookie is not None
-        # Validate we can decode it
-        data = mock_signer.loads(session_cookie)
-        assert data["username"] == "testuser"
-        assert data["auth_method"] == "oauth2"
-        assert data["provider"] == "local"
-
-    def test_create_oauth2_session(self, mock_signer: URLSafeTimedSerializer):
-        """Test creating OAuth2 session cookie."""
-        # Act
-        session_cookie = create_session_cookie(
-            username="oauth_user", auth_method="oauth2", provider="cognito"
-        )
-
-        # Assert
-        assert session_cookie is not None
-        data = mock_signer.loads(session_cookie)
-        assert data["username"] == "oauth_user"
-        assert data["auth_method"] == "oauth2"
-        assert data["provider"] == "cognito"
-
-
-# =============================================================================
 # TEST: api_auth and web_auth
 # =============================================================================
 
@@ -1000,28 +986,28 @@ class TestCreateSessionCookie:
 class TestAuthWrappers:
     """Tests for api_auth and web_auth wrapper functions."""
 
-    def test_api_auth_calls_get_current_user(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_api_auth_calls_get_current_user(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test api_auth delegates to get_current_user."""
-        # Arrange
-        session_data = {"username": "apiuser"}
-        session_cookie = mock_signer.dumps(session_data)
+        mock_session_store.next_value = {"username": "apiuser", "auth_method": "oauth2"}
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Act
-        username = api_auth(session=session_cookie)
+        username = await api_auth(session=session_cookie)
 
-        # Assert
         assert username == "apiuser"
 
-    def test_web_auth_calls_get_current_user(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_web_auth_calls_get_current_user(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test web_auth delegates to get_current_user."""
-        # Arrange
-        session_data = {"username": "webuser"}
-        session_cookie = mock_signer.dumps(session_data)
+        mock_session_store.next_value = {"username": "webuser", "auth_method": "oauth2"}
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Act
-        username = web_auth(session=session_cookie)
+        username = await web_auth(session=session_cookie)
 
-        # Assert
         assert username == "webuser"
 
 
@@ -1039,20 +1025,19 @@ class TestEnhancedAuth:
     async def test_enhanced_auth_traditional_user_rejected(
         self,
         mock_signer: URLSafeTimedSerializer,
+        mock_session_store,
         mock_scopes_config: dict[str, Any],
     ):
         """Test enhanced_auth rejects traditional (non-OAuth2) sessions."""
-        # Arrange
-        session_data = {
+        mock_session_store.next_value = {
             "username": "admin",
             "auth_method": "traditional",
             "provider": "local",
         }
-        session_cookie = mock_signer.dumps(session_data)
+        session_cookie = _make_session_cookie(mock_signer)
         mock_request = Mock(spec=Request)
         mock_request.state = Mock()
 
-        # Act & Assert - traditional sessions should be rejected
         with pytest.raises(HTTPException) as exc_info:
             await enhanced_auth(request=mock_request, session=session_cookie)
         assert exc_info.value.status_code == 401
@@ -1061,24 +1046,23 @@ class TestEnhancedAuth:
     async def test_enhanced_auth_oauth2_user(
         self,
         mock_signer: URLSafeTimedSerializer,
+        mock_session_store,
         mock_scopes_config: dict[str, Any],
     ):
         """Test enhanced_auth for OAuth2 user."""
-        # Arrange
-        session_data = {
+        mock_session_store.next_value = {
+            "session_id": "sid-1",
             "username": "oauth_user",
             "auth_method": "oauth2",
             "provider": "cognito",
             "groups": ["registry-users-lob1"],
         }
-        session_cookie = mock_signer.dumps(session_data)
+        session_cookie = _make_session_cookie(mock_signer)
         mock_request = Mock(spec=Request)
         mock_request.state = Mock()
 
-        # Act
         context = await enhanced_auth(request=mock_request, session=session_cookie)
 
-        # Assert
         assert context["username"] == "oauth_user"
         assert context["auth_method"] == "oauth2"
         assert "registry-users-lob1" in context["groups"]
@@ -1110,21 +1094,23 @@ class TestNginxProxiedAuth:
     """Tests for nginx_proxied_auth dependency."""
 
     @pytest.mark.asyncio
-    async def test_nginx_auth_with_headers(self, mock_scopes_config: dict[str, Any]):
-        """Test nginx auth with X-User headers."""
-        # Arrange
+    async def test_nginx_auth_without_x_groups_keeps_groups_empty(
+        self, mock_scopes_config: dict[str, Any]
+    ):
+        """When X-Groups is absent, groups stay empty (#933).
+
+        Previously the proxied path synthesized "mcp-registry-admin" from a
+        scope heuristic when X-Groups was missing — granting admin to
+        non-admins on the proxied path while the cookie path correctly said
+        non-admin for the same user. The synthesis is now removed; admin
+        status is derived purely from scope-based ui_permissions.
+        """
         mock_request = Mock(spec=Request)
         mock_request.url.path = "/api/test"
         mock_request.method = "GET"
         mock_request.state = Mock()
-        mock_request.headers = {
-            "x-user": "nginx_user",
-            "x-username": "nginx_user",
-            "x-scopes": "mcp-servers-unrestricted/read mcp-servers-unrestricted/execute",
-            "x-auth-method": "keycloak",
-        }
+        mock_request.headers = {}
 
-        # Act
         context = await nginx_proxied_auth(
             request=mock_request,
             session=None,
@@ -1132,37 +1118,60 @@ class TestNginxProxiedAuth:
             x_username="nginx_user",
             x_scopes="mcp-servers-unrestricted/read mcp-servers-unrestricted/execute",
             x_auth_method="keycloak",
+            x_groups=None,
         )
 
-        # Assert
         assert context["username"] == "nginx_user"
         assert context["auth_method"] == "keycloak"
         assert "mcp-servers-unrestricted/read" in context["scopes"]
-        assert "mcp-registry-admin" in context["groups"]
+        # No synthesis: groups stay empty when X-Groups isn't forwarded.
+        assert context["groups"] == []
 
     @pytest.mark.asyncio
-    async def test_nginx_auth_fallback_to_session_oauth2(
-        self,
-        mock_signer: URLSafeTimedSerializer,
-        mock_scopes_config: dict[str, Any],
-    ):
-        """Test nginx auth falls back to OAuth2 session cookie."""
-        # Arrange
+    async def test_nginx_auth_uses_forwarded_x_groups(self, mock_scopes_config: dict[str, Any]):
+        """X-Groups header is propagated verbatim into user_context."""
         mock_request = Mock(spec=Request)
         mock_request.url.path = "/api/test"
         mock_request.method = "GET"
         mock_request.state = Mock()
         mock_request.headers = {}
 
-        session_data = {
+        context = await nginx_proxied_auth(
+            request=mock_request,
+            session=None,
+            x_user="nginx_user",
+            x_username="nginx_user",
+            x_scopes="mcp-servers-unrestricted/read",
+            x_auth_method="keycloak",
+            x_groups="registry-admins developers",
+        )
+
+        assert context["username"] == "nginx_user"
+        assert context["groups"] == ["registry-admins", "developers"]
+
+    @pytest.mark.asyncio
+    async def test_nginx_auth_fallback_to_session_oauth2(
+        self,
+        mock_signer: URLSafeTimedSerializer,
+        mock_session_store,
+        mock_scopes_config: dict[str, Any],
+    ):
+        """Test nginx auth falls back to OAuth2 session cookie."""
+        mock_request = Mock(spec=Request)
+        mock_request.url.path = "/api/test"
+        mock_request.method = "GET"
+        mock_request.state = Mock()
+        mock_request.headers = {}
+
+        mock_session_store.next_value = {
+            "session_id": "sid-1",
             "username": "session_user",
             "auth_method": "oauth2",
             "provider": "cognito",
             "groups": ["registry-admins"],
         }
-        session_cookie = mock_signer.dumps(session_data)
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Act
         context = await nginx_proxied_auth(
             request=mock_request,
             session=session_cookie,
@@ -1173,7 +1182,6 @@ class TestNginxProxiedAuth:
             x_client_id=None,
         )
 
-        # Assert
         assert context["username"] == "session_user"
         assert context["auth_method"] == "oauth2"
 
@@ -1181,21 +1189,21 @@ class TestNginxProxiedAuth:
     async def test_nginx_auth_fallback_rejects_traditional_session(
         self,
         mock_signer: URLSafeTimedSerializer,
+        mock_session_store,
         mock_scopes_config: dict[str, Any],
     ):
         """Test nginx auth rejects traditional (non-OAuth2) session cookies."""
-        # Arrange
         mock_request = Mock(spec=Request)
         mock_request.url.path = "/api/test"
         mock_request.method = "GET"
         mock_request.state = Mock()
         mock_request.headers = {}
 
-        session_data = {
+        mock_session_store.next_value = {
             "username": "session_user",
             "auth_method": "traditional",
         }
-        session_cookie = mock_signer.dumps(session_data)
+        session_cookie = _make_session_cookie(mock_signer)
 
         # Act & Assert - traditional sessions should be rejected
         with pytest.raises(HTTPException) as exc_info:
@@ -1214,15 +1222,19 @@ class TestNginxProxiedAuth:
     async def test_nginx_auth_oauth2_user_without_admin_scopes(
         self, mock_scopes_config: dict[str, Any]
     ):
-        """Test OAuth2 user without admin scopes gets user group."""
-        # Arrange
+        """Non-admin scopes → not admin, regardless of group synthesis.
+
+        Previously this test asserted the synthesized group "mcp-registry-user"
+        was injected. After the synthesis removal (#933), groups stay empty
+        when X-Groups isn't forwarded; what matters is that is_admin reflects
+        the scopes correctly via ui_permissions.
+        """
         mock_request = Mock(spec=Request)
         mock_request.url.path = "/api/test"
         mock_request.method = "GET"
         mock_request.state = Mock()
         mock_request.headers = {}
 
-        # Act
         context = await nginx_proxied_auth(
             request=mock_request,
             session=None,
@@ -1232,10 +1244,9 @@ class TestNginxProxiedAuth:
             x_auth_method="cognito",
         )
 
-        # Assert
         assert context["username"] == "oauth_user"
-        assert "mcp-registry-user" in context["groups"]
-        assert "mcp-registry-admin" not in context["groups"]
+        assert context["groups"] == []
+        assert context["is_admin"] is False
 
 
 # =============================================================================
@@ -1248,15 +1259,16 @@ class TestNginxProxiedAuth:
 class TestEdgeCases:
     """Tests for edge cases and error handling."""
 
-    def test_session_with_empty_username(self, mock_signer: URLSafeTimedSerializer):
+    @pytest.mark.asyncio
+    async def test_session_with_empty_username(
+        self, mock_signer: URLSafeTimedSerializer, mock_session_store
+    ):
         """Test session with empty string username."""
-        # Arrange
-        session_data = {"username": ""}
-        session_cookie = mock_signer.dumps(session_data)
+        mock_session_store.next_value = {"username": "", "auth_method": "oauth2"}
+        session_cookie = _make_session_cookie(mock_signer)
 
-        # Act & Assert
         with pytest.raises(HTTPException) as exc_info:
-            get_current_user(session=session_cookie)
+            await get_current_user(session=session_cookie)
 
         assert exc_info.value.status_code == 401
 
@@ -1285,23 +1297,22 @@ class TestEdgeCases:
     async def test_enhanced_auth_oauth2_no_groups(
         self,
         mock_signer: URLSafeTimedSerializer,
+        mock_session_store,
         mock_scopes_config: dict[str, Any],
     ):
         """Test OAuth2 user with no groups gets minimal permissions."""
-        # Arrange
-        session_data = {
+        mock_session_store.next_value = {
+            "session_id": "sid-1",
             "username": "no_groups_user",
             "auth_method": "oauth2",
             "groups": [],
         }
-        session_cookie = mock_signer.dumps(session_data)
+        session_cookie = _make_session_cookie(mock_signer)
         mock_request = Mock(spec=Request)
         mock_request.state = Mock()
 
-        # Act
         context = await enhanced_auth(request=mock_request, session=session_cookie)
 
-        # Assert
         assert context["username"] == "no_groups_user"
         assert context["groups"] == []
         assert context["scopes"] == []
@@ -1333,15 +1344,15 @@ class TestNetworkTrustedAuthMethod:
         After issue #779, network-trusted goes through the standard resolution
         path (hard-coded admin branch removed). The auth server now returns the
         full scope set including UI scope names (e.g. mcp-registry-admin) so
-        the registry can derive admin status via _user_is_admin.
+        the registry can derive admin status via _user_is_admin. After #933,
+        groups are not synthesized from scopes; admin status here is driven
+        by ui_permissions resolved from the mcp-registry-admin scope.
         """
-        # Arrange
         mock_request = Mock(spec=Request)
         mock_request.url.path = "/api/servers"
         mock_request.method = "GET"
         mock_request.headers = {}
 
-        # Act: scopes now include the UI scope name for admin resolution
         context = await nginx_proxied_auth(
             request=mock_request,
             session=None,
@@ -1351,12 +1362,11 @@ class TestNetworkTrustedAuthMethod:
             x_auth_method="network-trusted",
         )
 
-        # Assert
         assert context["username"] == "network-user"
         assert context["auth_method"] == "network-trusted"
-        assert "mcp-registry-admin" in context["groups"]
         assert "mcp-servers-unrestricted/read" in context["scopes"]
         assert "mcp-servers-unrestricted/execute" in context["scopes"]
+        # is_admin derives from scope→ui_permissions, not from synthesized groups.
         assert context["is_admin"] is True
 
     @pytest.mark.asyncio
@@ -1383,6 +1393,100 @@ class TestNetworkTrustedAuthMethod:
         # Assert
         assert context["username"] == "monitoring-script"
         assert context["is_admin"] is False
+
+
+# =============================================================================
+# REGRESSION: cookie path and proxied path must agree on is_admin (#933)
+# =============================================================================
+
+
+@pytest.mark.unit
+@pytest.mark.auth
+class TestAuthPathsAgreeOnIsAdmin:
+    """Same user, same groups → same is_admin regardless of which dependency
+    resolved them. This is the core invariant #933 broke."""
+
+    @pytest.mark.asyncio
+    async def test_admin_user_is_admin_on_both_paths(
+        self,
+        mock_signer: URLSafeTimedSerializer,
+        mock_session_store,
+        mock_scopes_config: dict[str, Any],
+    ):
+        admin_groups = ["mcp-registry-admin"]
+
+        # Cookie path: enhanced_auth via session_store
+        mock_session_store.next_value = {
+            "session_id": "sid-1",
+            "username": "alice",
+            "auth_method": "oauth2",
+            "provider": "cognito",
+            "groups": admin_groups,
+        }
+        session_cookie = _make_session_cookie(mock_signer)
+        cookie_request = Mock(spec=Request)
+        cookie_request.state = Mock()
+        cookie_context = await enhanced_auth(request=cookie_request, session=session_cookie)
+
+        # Proxied path: nginx_proxied_auth with X-Groups + X-Scopes pre-computed
+        # by the auth_server (mirrors what /validate would forward).
+        proxied_request = Mock(spec=Request)
+        proxied_request.url.path = "/api/test"
+        proxied_request.method = "GET"
+        proxied_request.state = Mock()
+        proxied_request.headers = {}
+        proxied_context = await nginx_proxied_auth(
+            request=proxied_request,
+            session=None,
+            x_user="alice",
+            x_username="alice",
+            x_scopes="mcp-registry-admin",
+            x_auth_method="cognito",
+            x_groups=" ".join(admin_groups),
+        )
+
+        assert cookie_context["is_admin"] == proxied_context["is_admin"]
+        assert cookie_context["is_admin"] is True
+        assert cookie_context["ui_permissions"] == proxied_context["ui_permissions"]
+
+    @pytest.mark.asyncio
+    async def test_non_admin_is_not_admin_on_either_path(
+        self,
+        mock_signer: URLSafeTimedSerializer,
+        mock_session_store,
+        mock_scopes_config: dict[str, Any],
+    ):
+        user_groups = ["registry-users-lob1"]
+
+        mock_session_store.next_value = {
+            "session_id": "sid-2",
+            "username": "bob",
+            "auth_method": "oauth2",
+            "provider": "cognito",
+            "groups": user_groups,
+        }
+        session_cookie = _make_session_cookie(mock_signer)
+        cookie_request = Mock(spec=Request)
+        cookie_request.state = Mock()
+        cookie_context = await enhanced_auth(request=cookie_request, session=session_cookie)
+
+        proxied_request = Mock(spec=Request)
+        proxied_request.url.path = "/api/test"
+        proxied_request.method = "GET"
+        proxied_request.state = Mock()
+        proxied_request.headers = {}
+        proxied_context = await nginx_proxied_auth(
+            request=proxied_request,
+            session=None,
+            x_user="bob",
+            x_username="bob",
+            x_scopes="registry-users-lob1",
+            x_auth_method="cognito",
+            x_groups=" ".join(user_groups),
+        )
+
+        assert cookie_context["is_admin"] is False
+        assert proxied_context["is_admin"] is False
 
 
 # =============================================================================

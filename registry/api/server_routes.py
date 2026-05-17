@@ -379,7 +379,7 @@ async def read_root(
 
     try:
         # Get user context
-        user_context = enhanced_auth(session)
+        user_context = await enhanced_auth(request, session)
     except HTTPException as e:
         logger.info(f"Authentication failed at root route: {e.detail}, redirecting to login")
         return RedirectResponse(url="/login", status_code=302)
@@ -490,7 +490,11 @@ async def read_root(
             "username": user_context["username"],
             "user_context": user_context,  # Pass full user context to template
             "can_perform_action": can_perform_action,  # Helper function for permission checks
-            "csrf_token": generate_csrf_token(session) if session else "",
+            "csrf_token": (
+                generate_csrf_token(user_context["session_id"])
+                if user_context.get("session_id")
+                else ""
+            ),
         },
     )
 
@@ -1810,7 +1814,6 @@ async def edit_server_form(
                 detail="You do not have access to edit this server",
             )
 
-    session_cookie = request.cookies.get(settings.session_cookie_name, "")
     return templates.TemplateResponse(
         "edit_server.html",
         {
@@ -1818,7 +1821,11 @@ async def edit_server_form(
             "server": server_info,
             "username": user_context["username"],
             "user_context": user_context,
-            "csrf_token": generate_csrf_token(session_cookie) if session_cookie else "",
+            "csrf_token": (
+                generate_csrf_token(user_context["session_id"])
+                if user_context.get("session_id")
+                else ""
+            ),
         },
     )
 
@@ -2988,7 +2995,7 @@ async def generate_user_token(
         try:
             session_cookie = request.cookies.get(settings.session_cookie_name)
             logger.info(f"Session cookie present: {bool(session_cookie)}")
-            session_data = get_user_session_data(session_cookie)
+            session_data = await get_user_session_data(session_cookie)
             logger.info(
                 f"Session data extracted: auth_method={session_data.get('auth_method')}, "
                 f"provider={session_data.get('provider')}, "

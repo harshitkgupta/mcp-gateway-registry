@@ -95,6 +95,10 @@ def pytest_configure(config):
     # (dedicated gate tests mock settings directly)
     os.environ["REGISTRATION_GATE_ENABLED"] = "false"
 
+    # NOTE: SECRET_KEY is set at module-import time near the top of this
+    # conftest, because Settings() is constructed during import and refuses
+    # to start without one — pytest_configure runs too late for that path.
+
     print(
         "Test environment configured: DOCUMENTDB_HOST=localhost, STORAGE_BACKEND=mongodb-ce, DOCUMENTDB_DIRECT_CONNECTION=true, DOCUMENTDB_USE_TLS=false"
     )
@@ -157,6 +161,15 @@ def _setup_auto_mocking() -> None:
 
 # Execute auto-mocking setup
 _setup_auto_mocking()
+
+
+# SECRET_KEY must be set before importing registry.core.config, because
+# Settings() is constructed at module-import time and refuses to start
+# without one. pytest_configure() runs AFTER conftest import, so setting it
+# there is too late.
+os.environ.setdefault(
+    "SECRET_KEY", "test-secret-key-for-testing-only-do-not-use-in-production"
+)
 
 
 # Now we can safely import registry modules
@@ -242,9 +255,7 @@ def test_settings(tmp_path: Path) -> Settings:
         documentdb_direct_connection=True,  # Use direct connection for single-node MongoDB
         # Use per-session isolated DB name set in pytest_configure to avoid
         # sharing state with the production "mcp_registry" database.
-        documentdb_database=os.environ.get(
-            "DOCUMENTDB_DATABASE", f"test_{uuid.uuid4().hex[:8]}"
-        ),
+        documentdb_database=os.environ.get("DOCUMENTDB_DATABASE", f"test_{uuid.uuid4().hex[:8]}"),
     )
 
     # Patch path properties to use temp directories

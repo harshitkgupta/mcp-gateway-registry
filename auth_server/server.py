@@ -83,6 +83,7 @@ DEFAULT_TOKEN_LIFETIME_HOURS = 8
 user_token_generation_counts = {}
 MAX_TOKENS_PER_USER_PER_HOUR = int(os.environ.get("MAX_TOKENS_PER_USER_PER_HOUR", "100"))
 
+
 # MCP tools/list filter configuration (Issue #1026).
 #
 # Prefer the canonical registry.core.config.settings fields when they
@@ -116,11 +117,10 @@ def _read_mcp_proxy_max_body_bytes() -> int:
     try:
         candidate = int(raw)
     except ValueError:
-        logging.warning(
-            f"Invalid MCP_PROXY_MAX_BODY_BYTES={raw!r}; using default {default_bytes}"
-        )
+        logging.warning(f"Invalid MCP_PROXY_MAX_BODY_BYTES={raw!r}; using default {default_bytes}")
         return default_bytes
     return max(candidate, minimum_bytes)
+
 
 # Global scopes configuration (will be loaded during FastAPI startup)
 SCOPES_CONFIG = {}
@@ -132,16 +132,6 @@ _registry_static_token_requested: bool = (
 
 # Static API key for Registry API (must match Bearer token value when enabled)
 REGISTRY_API_TOKEN: str = os.environ.get("REGISTRY_API_TOKEN", "")
-
-# OAuth token storage in session cookies (disable for IdPs with large tokens)
-# Default: false - tokens are not used functionally and storing them risks cookie size limits
-OAUTH_STORE_TOKENS_IN_SESSION: bool = (
-    os.environ.get("OAUTH_STORE_TOKENS_IN_SESSION", "false").lower() == "true"
-)
-
-logging.info(
-    f"OAUTH_STORE_TOKENS_IN_SESSION={'enabled' if OAUTH_STORE_TOKENS_IN_SESSION else 'disabled'}"
-)
 
 # Issue #779: multiple static API keys with per-key groups.
 _REGISTRY_API_KEYS_RAW: str = os.environ.get("REGISTRY_API_KEYS", "").strip()
@@ -694,14 +684,22 @@ async def validate_session_cookie(cookie_value: str) -> dict[str, any]:
         raise ValueError("Session cookie validation not configured")
 
     try:
-        # Decrypt cookie (max_age=28800 for 8 hours)
-        data = signer.loads(cookie_value, max_age=28800)
+        # Decrypt cookie (max_age=28800 for 8 hours). The cookie now carries
+        # only an opaque session_id; the full record lives server-side.
+        payload = signer.loads(cookie_value, max_age=28800)
 
-        # Extract user info
-        username = data.get("username")
-        groups = data.get("groups", [])
+        # Reject legacy dict-payload cookies (forces re-login post-rollout).
+        if not isinstance(payload, str):
+            raise ValueError("Legacy session cookie format; please re-login")
 
-        # Map groups to scopes (async call to query DocumentDB)
+        from session_store import resolve_session
+
+        session_data = await resolve_session(payload)
+        if not session_data or not session_data.get("username"):
+            raise ValueError("Session not found or expired")
+
+        username = session_data["username"]
+        groups = session_data.get("groups", [])
         scopes = await map_groups_to_scopes(groups)
 
         logger.info(f"Session cookie validated for user: {hash_username(username)}")
@@ -713,7 +711,7 @@ async def validate_session_cookie(cookie_value: str) -> dict[str, any]:
             "method": "session_cookie",
             "groups": groups,
             "client_id": "",  # Not applicable for session
-            "data": data,  # Include full data for consistency
+            "data": session_data,
         }
     except SignatureExpired:
         logger.warning("Session cookie has expired")
@@ -721,6 +719,8 @@ async def validate_session_cookie(cookie_value: str) -> dict[str, any]:
     except BadSignature:
         logger.warning("Invalid session cookie signature")
         raise ValueError("Invalid session cookie")
+    except ValueError:
+        raise
     except Exception as e:
         logger.error(f"Session cookie validation error: {e}")
         raise ValueError(f"Session cookie validation failed: {e}")
@@ -938,9 +938,7 @@ async def filter_tools_list_response(
     kept: list[dict] = []
 
     if not isinstance(tools_list, list):
-        logger.info(
-            f"filter_tools_list_response: server={server_name} before=0 after=0"
-        )
+        logger.info(f"filter_tools_list_response: server={server_name} before=0 after=0")
         return kept
 
     for tool in tools_list:
@@ -1166,9 +1164,7 @@ class ResourceBinding(BaseModel):
     # ``{"id": 123}`` into ``"123"``. Resource ids are compared
     # byte-for-byte against URL paths at the edge; a coerced numeric id
     # would silently mint a token nobody can actually use.
-    id: StrictStr = Field(
-        ..., min_length=1, description="Resource identifier (path or slug)"
-    )
+    id: StrictStr = Field(..., min_length=1, description="Resource identifier (path or slug)")
 
     @field_validator("id")
     @classmethod
@@ -1179,9 +1175,7 @@ class ResourceBinding(BaseModel):
         # truncation in C-backed URL parsers downstream and should never
         # appear in a legitimate resource id.
         if ".." in v or "%" in v:
-            raise ValueError(
-                "Resource id must not contain '..' or percent-encoded characters"
-            )
+            raise ValueError("Resource id must not contain '..' or percent-encoded characters")
         if any(ord(c) < 0x20 or ord(c) == 0x7F for c in v):
             raise ValueError("Resource id must not contain control characters")
         stripped = v.strip()
@@ -2222,9 +2216,7 @@ async def validate_request(request: Request):
                 )
 
             request_path = urlparse(original_url).path
-            if not check_resource_token_allowed(
-                request_path, root_path=REGISTRY_ROOT_PATH
-            ):
+            if not check_resource_token_allowed(request_path, root_path=REGISTRY_ROOT_PATH):
                 logger.warning(
                     f"Resource token for {hash_username(validation_result.get('username') or '')} "
                     f"rejected at blocked endpoint: {original_url}"
@@ -2241,16 +2233,10 @@ async def validate_request(request: Request):
             # Accept here, before classification, so resource-bound tokens
             # can verify themselves without tripping the "unclassifiable"
             # check below.
-            if is_resource_token_introspection_path(
-                request_path, root_path=REGISTRY_ROOT_PATH
-            ):
-                logger.info(
-                    f"Resource-bound token on introspection endpoint: {request_path}"
-                )
+            if is_resource_token_introspection_path(request_path, root_path=REGISTRY_ROOT_PATH):
+                logger.info(f"Resource-bound token on introspection endpoint: {request_path}")
             else:
-                classified = classify_request_url(
-                    request_path, root_path=REGISTRY_ROOT_PATH
-                )
+                classified = classify_request_url(request_path, root_path=REGISTRY_ROOT_PATH)
                 if classified is None:
                     logger.warning(
                         f"Resource token for "
@@ -2291,9 +2277,7 @@ async def validate_request(request: Request):
                         detail="Resource-bound token does not permit this request",
                         headers={"Connection": "close"},
                     )
-                logger.info(
-                    f"Resource-bound token match: {claim_type}:{normalized_claim_id}"
-                )
+                logger.info(f"Resource-bound token match: {claim_type}:{normalized_claim_id}")
         else:
             # Unknown ``token_kind`` value. Only this code is supposed to
             # mint self-signed tokens (and it emits "user" or "resource").
@@ -2657,9 +2641,7 @@ async def generate_user_token(
                 "exp": current_time + expires_in,
                 "description": request.description,
                 TOKEN_KIND_CLAIM: (
-                    TokenKind.RESOURCE.value
-                    if request.resource
-                    else TokenKind.USER.value
+                    TokenKind.RESOURCE.value if request.resource else TokenKind.USER.value
                 ),
             }
 
@@ -2921,15 +2903,15 @@ def substitute_env_vars(config):
 # Global OAuth2 configuration
 OAUTH2_CONFIG = load_oauth2_config()
 
-# Initialize SECRET_KEY and signer for session management
+# Initialize SECRET_KEY and signer for session management.
+# Fail loud: a per-replica random key would silently break sessions across replicas
+# (auth_server signs with key A, registry verifies with key B → BadSignature on every request).
 SECRET_KEY = os.environ.get("SECRET_KEY")
 if not SECRET_KEY:
-    # Generate a secure random key (32 bytes = 256 bits of entropy)
-    SECRET_KEY = secrets.token_hex(32)
-    logger.warning(
-        "No SECRET_KEY environment variable found. Using a randomly generated key. "
-        "While this is more secure than a hardcoded default, it will change on restart. "
-        "Set a permanent SECRET_KEY environment variable for production."
+    raise RuntimeError(
+        "SECRET_KEY environment variable is required. "
+        "Set it to a value at least 32 bytes long, identical across all auth_server "
+        "and registry replicas (see chart values.yaml: global.secretKey)."
     )
 
 signer = URLSafeTimedSerializer(SECRET_KEY)
@@ -3335,6 +3317,22 @@ async def oauth2_callback(
                     if not groups:
                         groups = id_token_claims.get("roles", [])
 
+                    # Group overage: when a user is a member of more groups
+                    # than will fit in the token (Entra caps inline groups
+                    # around 150-200), Entra omits them and signals via
+                    # `hasgroups` or `_claim_names.groups`. Fall back to
+                    # Microsoft Graph /me/memberOf so the user gets their
+                    # real group set instead of an empty session (#929).
+                    from providers.entra import EntraIdProvider
+
+                    if EntraIdProvider.has_group_overage(id_token_claims):
+                        logger.info("Entra ID token signals group overage; resolving via Graph")
+                        graph_groups = await EntraIdProvider.fetch_groups_via_graph(
+                            token_data["access_token"]
+                        )
+                        if graph_groups:
+                            groups = graph_groups
+
                     mapped_user = {
                         "username": id_token_claims.get("preferred_username")
                         or id_token_claims.get("email")
@@ -3416,30 +3414,26 @@ async def oauth2_callback(
             mapped_user = map_user_info(user_info, provider_config)
             logger.info(f"Mapped user info: {mapped_user}")
 
-        # Create session cookie compatible with registry
-        session_data = {
-            "username": mapped_user["username"],
-            "email": mapped_user.get("email"),
-            "name": mapped_user.get("name"),
-            "groups": mapped_user.get("groups", []),
-            "provider": provider,
-            "auth_method": "oauth2",
-            # Always store id_token for OIDC logout (not a credential, just identity info)
-            # Required for proper SSO logout with id_token_hint parameter
-            "id_token": token_data.get("id_token"),
-        }
+        # Persist the full session record server-side and put only an opaque
+        # session_id in the browser cookie. This prevents cookie-size failures
+        # for IdPs that return large groups claims (e.g. Entra ID with many
+        # group memberships) and keeps id_token off the client entirely.
+        session_max_age = OAUTH2_CONFIG.get("session", {}).get("max_age_seconds", 28800)
+        # id_token is encrypted at rest server-side and required for OIDC SSO
+        # logout (id_token_hint).
+        from session_store import create_session
 
-        # Optionally store token metadata (legacy flag, not needed for security)
-        # Note: access_token and refresh_token are never stored (removed in issue #490)
-        if OAUTH_STORE_TOKENS_IN_SESSION:
-            session_data.update(
-                {
-                    "token_expires_in": token_data.get("expires_in"),
-                    "token_obtained_at": int(time.time()),
-                }
-            )
-
-        registry_session = signer.dumps(session_data)
+        session_id = await create_session(
+            username=mapped_user["username"],
+            email=mapped_user.get("email"),
+            name=mapped_user.get("name"),
+            groups=mapped_user.get("groups", []),
+            provider=provider,
+            auth_method="oauth2",
+            max_age_seconds=session_max_age,
+            id_token=token_data.get("id_token"),
+        )
+        registry_session = signer.dumps(session_id)
 
         # Redirect to registry with session cookie
         redirect_url = temp_session_data.get(
@@ -3483,7 +3477,7 @@ async def oauth2_callback(
         cookie_params = {
             "key": "mcp_gateway_session",  # Same as registry SESSION_COOKIE_NAME
             "value": registry_session,
-            "max_age": OAUTH2_CONFIG.get("session", {}).get("max_age_seconds", 28800),
+            "max_age": session_max_age,
             "httponly": OAUTH2_CONFIG.get("session", {}).get("httponly", True),
             "samesite": cookie_samesite,
             "secure": cookie_secure,
@@ -3760,8 +3754,7 @@ async def _read_bounded(
             raise HTTPException(
                 status_code=413,
                 detail=(
-                    f"Upstream tools/list response exceeded "
-                    f"{max_bytes} bytes; refusing to buffer."
+                    f"Upstream tools/list response exceeded {max_bytes} bytes; refusing to buffer."
                 ),
             )
         chunks.append(chunk)
@@ -3804,9 +3797,7 @@ async def mcp_proxy(
     """
     upstream_url = request.headers.get("X-Upstream-Url")
     if not upstream_url:
-        logger.warning(
-            f"mcp_proxy: missing X-Upstream-Url header for server={server_name}"
-        )
+        logger.warning(f"mcp_proxy: missing X-Upstream-Url header for server={server_name}")
         raise HTTPException(
             status_code=400,
             detail="Missing X-Upstream-Url header",
@@ -3841,8 +3832,7 @@ async def mcp_proxy(
     forward_headers = _forward_headers(dict(request.headers))
 
     logger.info(
-        f"mcp_proxy: server={server_name} method={incoming_method} "
-        f"filter_enabled={filter_enabled}"
+        f"mcp_proxy: server={server_name} method={incoming_method} filter_enabled={filter_enabled}"
     )
 
     try:
@@ -3858,9 +3848,7 @@ async def mcp_proxy(
                 # pathological upstream cannot DoS the proxy.
                 body_bytes = await _read_bounded(upstream_response, max_body_bytes)
                 status_code = upstream_response.status_code
-                content_type = upstream_response.headers.get(
-                    "content-type", "application/json"
-                )
+                content_type = upstream_response.headers.get("content-type", "application/json")
     except HTTPException:
         raise
     except httpx.TimeoutException as exc:
@@ -3899,8 +3887,7 @@ async def mcp_proxy(
         parsed = json.loads(body_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         logger.warning(
-            f"mcp_proxy: tools/list upstream returned non-JSON body "
-            f"for server={server_name}: {exc}"
+            f"mcp_proxy: tools/list upstream returned non-JSON body for server={server_name}: {exc}"
         )
         return JSONResponse(
             content=_safe_parse_body(body_bytes),
@@ -3985,9 +3972,7 @@ async def _audit_legacy_scopes_on_startup() -> int:
         try:
             rules = await scope_repo.get_server_scopes(scope_name)
         except Exception as exc:
-            logger.warning(
-                f"Legacy scope audit: get_server_scopes({scope_name}) failed: {exc}"
-            )
+            logger.warning(f"Legacy scope audit: get_server_scopes({scope_name}) failed: {exc}")
             continue
         for rule in rules or []:
             if not isinstance(rule, dict) or "server" not in rule:
@@ -4004,12 +3989,13 @@ async def _audit_legacy_scopes_on_startup() -> int:
                     "was intended)"
                 )
                 warnings_emitted += 1
-            elif isinstance(tools, list) and not tools and (
-                "tools/call" in methods or "all" in methods or "*" in methods
+            elif (
+                isinstance(tools, list)
+                and not tools
+                and ("tools/call" in methods or "all" in methods or "*" in methods)
             ):
                 logger.warning(
-                    f"empty_tools_list_with_call_method scope={scope_name} "
-                    f"server={server_name}"
+                    f"empty_tools_list_with_call_method scope={scope_name} server={server_name}"
                 )
                 warnings_emitted += 1
 
