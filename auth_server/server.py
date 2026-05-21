@@ -3715,11 +3715,17 @@ async def oauth2_logout(
 #                    written after /validate accepted the caller.
 #
 # All headers from the incoming request (except hop-by-hop headers) are
-# forwarded to the upstream. For any JSON-RPC method other than
-# "tools/list", the upstream response body is returned unchanged ("uniform
-# proxy"). For tools/list, the response body is buffered (up to
-# MCP_PROXY_MAX_BODY_BYTES), filtered via filter_tools_list_response, and
-# returned with an updated result.tools array.
+# forwarded to the upstream. The upstream response headers are likewise
+# forwarded back to the client (except framing/encoding headers that
+# Starlette must recompute) so streamable-http session state such as the
+# ``Mcp-Session-Id`` header that the upstream emits during ``initialize``
+# propagates end-to-end. Without that header the MCP client cannot
+# establish a session and follow-up calls fail with "Missing session ID".
+# For any JSON-RPC method other than "tools/list", the upstream response
+# body is returned unchanged ("uniform proxy"). For tools/list, the
+# response body is buffered (up to MCP_PROXY_MAX_BODY_BYTES), filtered
+# via filter_tools_list_response, and returned with an updated
+# result.tools array.
 
 
 _HOP_BY_HOP_HEADERS: frozenset[str] = frozenset(
@@ -3734,6 +3740,21 @@ _HOP_BY_HOP_HEADERS: frozenset[str] = frozenset(
         "upgrade",
         "host",
         "content-length",
+    }
+)
+
+
+# Headers we must NOT copy from the upstream MCP response onto the Starlette
+# response sent back to the client. They describe the wire-level framing of
+# the upstream HTTP message; Starlette computes the correct values for the
+# body it actually serializes (which may be httpx-decoded when the upstream
+# used Content-Encoding: gzip).
+_RESPONSE_FRAMING_HEADERS: frozenset[str] = frozenset(
+    {
+        "content-length",
+        "content-encoding",
+        "transfer-encoding",
+        "connection",
     }
 )
 
@@ -3777,6 +3798,23 @@ def _forward_headers(
             continue
         forwarded[key] = value
     return forwarded
+
+
+def _passthrough_response_headers(
+    upstream_headers: dict[str, str],
+) -> dict[str, str]:
+    """Copy upstream MCP response headers for return to the client,
+    stripping framing/encoding headers that Starlette must set itself.
+
+    Preserves all other headers, including ``Mcp-Session-Id`` which
+    streamable-http MCP servers emit during ``initialize`` and which the
+    client requires on follow-up requests to identify the session.
+    """
+    return {
+        key: value
+        for key, value in upstream_headers.items()
+        if key.lower() not in _RESPONSE_FRAMING_HEADERS
+    }
 
 
 @app.post("/mcp-proxy/{server_name:path}")
@@ -3849,6 +3887,11 @@ async def mcp_proxy(
                 body_bytes = await _read_bounded(upstream_response, max_body_bytes)
                 status_code = upstream_response.status_code
                 content_type = upstream_response.headers.get("content-type", "application/json")
+                # Snapshot upstream headers BEFORE leaving the stream
+                # context. httpx releases response.headers when the
+                # async-with block exits; reading them afterwards returns
+                # an empty mapping and Mcp-Session-Id is silently lost.
+                upstream_headers = dict(upstream_response.headers)
     except HTTPException:
         raise
     except httpx.TimeoutException as exc:
@@ -3872,6 +3915,10 @@ async def mcp_proxy(
         and "application/json" in content_type.lower()
     )
 
+    # Forward upstream response headers (e.g. Mcp-Session-Id) on every
+    # branch; the upstream is the source of truth for session state.
+    response_headers = _passthrough_response_headers(upstream_headers)
+
     if not should_filter:
         # Forward the upstream body and content_type unchanged. Many MCP
         # servers reply with text/event-stream (SSE) rather than plain JSON;
@@ -3881,6 +3928,7 @@ async def mcp_proxy(
             content=body_bytes,
             status_code=status_code,
             media_type=content_type,
+            headers=response_headers,
         )
 
     try:
@@ -3892,6 +3940,7 @@ async def mcp_proxy(
         return JSONResponse(
             content=_safe_parse_body(body_bytes),
             status_code=status_code,
+            headers=response_headers,
         )
 
     result = parsed.get("result") if isinstance(parsed, dict) else None
@@ -3904,7 +3953,11 @@ async def mcp_proxy(
         result["tools"] = filtered
         parsed["result"] = result
 
-    return JSONResponse(content=parsed, status_code=status_code)
+    return JSONResponse(
+        content=parsed,
+        status_code=status_code,
+        headers=response_headers,
+    )
 
 
 def _safe_parse_body(

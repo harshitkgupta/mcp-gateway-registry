@@ -2328,3 +2328,281 @@ class TestMultiKeyStaticTokenValidate:
             data = response.json()
             assert data["scopes"] == []
             assert data["username"] == "empty-scope-key"
+
+
+# =============================================================================
+# MCP PROXY HEADER PASSTHROUGH TESTS
+# =============================================================================
+#
+# The /mcp-proxy/{server_name} hop introduced in Issue #1026 buffers the
+# upstream MCP response and re-emits it via Starlette. Earlier revisions of
+# the handler built that Starlette response from body + status + content-type
+# only, silently dropping every other upstream response header -- including
+# Mcp-Session-Id, which streamable-http MCP servers emit during initialize
+# and which the client requires on follow-up requests. These tests pin the
+# helper and the three return-site branches so that regression cannot recur.
+
+
+def _build_mock_upstream_response(
+    status_code: int,
+    headers: dict[str, str],
+    body: bytes,
+) -> MagicMock:
+    """Build a MagicMock that mimics the surface of httpx.Response used by
+    auth_server.server.mcp_proxy: aiter_bytes(chunk_size=...), status_code,
+    and headers.
+    """
+    mock_resp = MagicMock()
+    mock_resp.status_code = status_code
+    mock_resp.headers = headers
+
+    async def _aiter(chunk_size: int = 64 * 1024):
+        yield body
+
+    mock_resp.aiter_bytes = _aiter
+    return mock_resp
+
+
+def _patch_httpx_async_client(mock_upstream_response: MagicMock):
+    """Return a patch context manager that replaces
+    ``auth_server.server.httpx.AsyncClient`` so the ``async with
+    httpx.AsyncClient(...) as client: async with client.stream(...) as
+    response:`` chain yields ``mock_upstream_response``.
+    """
+    mock_stream_cm = AsyncMock()
+    mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_upstream_response)
+    mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
+
+    mock_client = AsyncMock()
+    mock_client.stream = MagicMock(return_value=mock_stream_cm)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    return patch("auth_server.server.httpx.AsyncClient", return_value=mock_client)
+
+
+class TestPassthroughResponseHeaders:
+    """Tests for the _passthrough_response_headers helper that decides
+    which upstream headers are safe to forward back to the client.
+    """
+
+    def test_keeps_mcp_session_id(self):
+        """Mcp-Session-Id must survive the passthrough -- this is the
+        whole reason the helper exists.
+        """
+        from auth_server.server import _passthrough_response_headers
+
+        upstream = {
+            "content-type": "application/json",
+            "mcp-session-id": "sess-abc-123",
+        }
+
+        forwarded = _passthrough_response_headers(upstream)
+
+        assert forwarded["mcp-session-id"] == "sess-abc-123"
+
+    def test_strips_framing_headers(self):
+        """Framing/encoding headers (content-length, content-encoding,
+        transfer-encoding, connection) must be stripped so Starlette can
+        recompute them for the body it actually serializes.
+        """
+        from auth_server.server import _passthrough_response_headers
+
+        upstream = {
+            "content-type": "application/json",
+            "content-length": "1024",
+            "content-encoding": "gzip",
+            "transfer-encoding": "chunked",
+            "connection": "keep-alive",
+            "x-custom-header": "keep-me",
+        }
+
+        forwarded = _passthrough_response_headers(upstream)
+
+        assert "content-length" not in forwarded
+        assert "content-encoding" not in forwarded
+        assert "transfer-encoding" not in forwarded
+        assert "connection" not in forwarded
+        assert forwarded["x-custom-header"] == "keep-me"
+        assert forwarded["content-type"] == "application/json"
+
+    def test_strip_match_is_case_insensitive(self):
+        """HTTP header names are case-insensitive; httpx may emit any
+        casing. The strip set must match regardless of the upstream
+        casing or this becomes a silent regression.
+        """
+        from auth_server.server import _passthrough_response_headers
+
+        upstream = {
+            "Content-Length": "42",
+            "CONTENT-ENCODING": "gzip",
+            "Mcp-Session-Id": "sess-xyz",
+        }
+
+        forwarded = _passthrough_response_headers(upstream)
+
+        assert "Content-Length" not in forwarded
+        assert "CONTENT-ENCODING" not in forwarded
+        assert forwarded["Mcp-Session-Id"] == "sess-xyz"
+
+    def test_empty_input_returns_empty(self):
+        """Defensive: an empty upstream-header dict must produce an
+        empty forwarded dict, never a None or an error.
+        """
+        from auth_server.server import _passthrough_response_headers
+
+        assert _passthrough_response_headers({}) == {}
+
+
+class TestMcpProxyEndpointHeaderPassthrough:
+    """End-to-end-style tests that drive the FastAPI /mcp-proxy/... route
+    with a mocked httpx upstream and assert the client-visible response
+    headers include the upstream Mcp-Session-Id.
+    """
+
+    def test_session_id_forwarded_on_passthrough_branch(self):
+        """SSE / non-tools-list response: the early-return branch at
+        ``if not should_filter`` must include upstream Mcp-Session-Id on
+        the Starlette Response sent to the client.
+        """
+        import auth_server.server as server_module
+
+        upstream_resp = _build_mock_upstream_response(
+            status_code=200,
+            headers={
+                "content-type": "text/event-stream",
+                "mcp-session-id": "sess-passthrough-001",
+                "content-length": "12",
+            },
+            body=b"data: hello\n\n",
+        )
+
+        with (
+            _patch_httpx_async_client(upstream_resp),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/office-docs",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                headers={"X-Upstream-Url": "https://upstream.example/mcp"},
+            )
+
+        assert response.status_code == 200
+        assert response.headers.get("mcp-session-id") == "sess-passthrough-001"
+        # Framing header must not survive: Starlette sets its own.
+        assert response.headers.get("content-length") != "12"
+
+    def test_session_id_forwarded_on_filtered_tools_list_branch(self):
+        """tools/list with JSON body and filter enabled: the filtered
+        JSONResponse branch must also include upstream Mcp-Session-Id.
+        """
+        import auth_server.server as server_module
+
+        upstream_body = b'{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"t1"},{"name":"t2"}]}}'
+        upstream_resp = _build_mock_upstream_response(
+            status_code=200,
+            headers={
+                "content-type": "application/json",
+                "mcp-session-id": "sess-filtered-002",
+            },
+            body=upstream_body,
+        )
+
+        async def _no_filter(server_name, user_scopes, tools):
+            return tools
+
+        with (
+            _patch_httpx_async_client(upstream_resp),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=True),
+            patch.object(
+                server_module,
+                "filter_tools_list_response",
+                side_effect=_no_filter,
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/office-docs",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={"X-Upstream-Url": "https://upstream.example/mcp"},
+            )
+
+        assert response.status_code == 200
+        assert response.headers.get("mcp-session-id") == "sess-filtered-002"
+
+    def test_session_id_forwarded_on_tools_list_non_json_fallback(self):
+        """tools/list whose upstream body fails JSON parsing falls into
+        the ``_safe_parse_body`` JSONResponse branch; that branch must
+        still forward upstream Mcp-Session-Id.
+        """
+        import auth_server.server as server_module
+
+        upstream_resp = _build_mock_upstream_response(
+            status_code=200,
+            headers={
+                "content-type": "application/json",
+                "mcp-session-id": "sess-malformed-003",
+            },
+            body=b"not-json-at-all",
+        )
+
+        with (
+            _patch_httpx_async_client(upstream_resp),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=True),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/office-docs",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={"X-Upstream-Url": "https://upstream.example/mcp"},
+            )
+
+        assert response.status_code == 200
+        assert response.headers.get("mcp-session-id") == "sess-malformed-003"
+
+    def test_session_id_preserved_when_filter_flag_is_false(self):
+        """Regression guard for the workaround question: setting
+        MCP_TOOLS_LIST_FILTER_ENABLED=false alone is NOT enough --
+        nginx still routes through this endpoint, and the response
+        builder must forward Mcp-Session-Id regardless of the flag.
+        """
+        import auth_server.server as server_module
+
+        upstream_resp = _build_mock_upstream_response(
+            status_code=200,
+            headers={
+                "content-type": "application/json",
+                "mcp-session-id": "sess-flag-off-004",
+            },
+            body=b'{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}',
+        )
+
+        with (
+            _patch_httpx_async_client(upstream_resp),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/office-docs",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers={"X-Upstream-Url": "https://upstream.example/mcp"},
+            )
+
+        assert response.status_code == 200
+        assert response.headers.get("mcp-session-id") == "sess-flag-off-004"
+
+    def test_missing_upstream_url_header_rejected(self):
+        """Sanity: the existing 400 guard for missing X-Upstream-Url is
+        unaffected by the patch. Prevents accidental loosening.
+        """
+        import auth_server.server as server_module
+
+        client = TestClient(server_module.app)
+        response = client.post(
+            "/mcp-proxy/office-docs",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        )
+
+        assert response.status_code == 400
+        assert "X-Upstream-Url" in response.json()["detail"]
