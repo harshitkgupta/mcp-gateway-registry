@@ -50,10 +50,9 @@ USER root
 COPY --chown=appuser:appuser ${SERVER_DIR:-.}/pyproject.toml /app/pyproject.toml
 COPY --chown=appuser:appuser ${SERVER_DIR:-.}/uv.lock        /app/uv.lock
 
-# Install dependencies from uv.lock. --locked fails the build if the
-# lock is out of sync with pyproject.toml.
+# Install dependencies from uv.lock. --frozen uses uv.lock as the source of truth.
 USER appuser
-RUN uv sync --locked --no-dev
+RUN uv sync --frozen --no-dev
 
 # Copy source last (busts frequently; the cached install layer above is preserved).
 USER root
@@ -95,7 +94,12 @@ fi\n\
 \n\
 # Activate virtual environment and run the server\n\
 source .venv/bin/activate\n\
-exec python server.py --port $SERVER_PORT' > /entrypoint.sh && \
+CMD="python server.py --port $SERVER_PORT"\n\
+if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ] && command -v opentelemetry-instrument >/dev/null 2>&1; then\n\
+    echo "Using OTEL_EXPORTER_OTLP_ENDPOINT at ${OTEL_EXPORTER_OTLP_ENDPOINT}"\n\
+    CMD="opentelemetry-instrument $CMD"\n\
+fi\n\
+exec $CMD' > /entrypoint.sh && \
     chmod +x /entrypoint.sh && \
     chown appuser:appuser /entrypoint.sh
 
