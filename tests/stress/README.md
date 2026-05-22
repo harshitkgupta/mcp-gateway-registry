@@ -1,6 +1,6 @@
 # Registry Stress Test Harness
 
-Tracks [Issue #997](https://github.com/agentic-community/mcp-gateway-registry/issues/997). Implementation guide: [`lld-stress-test.md`](../../lld-stress-test.md).
+Tracks [Issue #997](https://github.com/agentic-community/mcp-gateway-registry/issues/997).
 
 This directory contains the registry stress test harness. The goal is to register 100/500/1000 MCP servers, A2A agents, and Agent Skills against a running registry and measure API + UI performance on both `mongodb-ce` and DocumentDB backends.
 
@@ -101,7 +101,7 @@ STRESS_MEASURE_API=1 bash tests/stress/run_stress_test.sh 100 skills \
     --token-file .token
 ```
 
-What it measures (per `lld-stress-test.md` §5):
+What it measures:
 
 - **List endpoints** (`/api/{servers,agents,skills}`) in three modes per type: first page (`limit=50`), max page (`limit=500`, the API's hard cap), and a pagination walkthrough (`offset=0,50,...`).
 - **Semantic search** (`POST /api/search/semantic`) for each of the 20 curated queries in `queries.json`, at `k ∈ {5, 10, 50}`, with `include_draft: true` so the `status: draft` stress corpus is visible.
@@ -309,4 +309,4 @@ uv run python -m api.registry_management remove-by-tag stress-test \
 - **Phase 4**: `report_builder.py` + `run_all.sh` — cross-size and cross-backend comparison reports.
 - **Phase 5**: `docs/performance-baselines.md` — committed baseline numbers produced from Phase 4 runs.
 
-See [`lld-stress-test.md`](../../lld-stress-test.md) for the full design.
+See [`docs/benchmarks/`](../../docs/benchmarks/) for published benchmark results.

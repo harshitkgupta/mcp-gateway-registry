@@ -6,6 +6,12 @@ global:
     tag: 1.24.1
     pullPolicy: IfNotPresent
 
+  cloud:
+    # AWS region for cloud detection in telemetry. Set this when deploying
+    # on AWS regardless of auth provider (Keycloak, Entra, Okta, etc.).
+    # Previously only injected for Cognito; now available unconditionally.
+    awsRegion: ""
+
   ingress:
     # Default ALB scheme for the registry's ingress when this subchart is
     # deployed standalone. Overridden by mcp-gateway-registry-stack's

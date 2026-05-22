@@ -293,6 +293,10 @@ def _detect_compute_platform() -> str:
     if os.path.exists("/.dockerenv"):
         return "docker"
 
+    # Podman: /run/.containerenv exists in Podman containers
+    if os.path.exists("/run/.containerenv"):
+        return "podman"
+
     # EC2: check for AWS hypervisor UUID
     try:
         with open("/sys/devices/virtual/dmi/id/board_asset_tag") as f:

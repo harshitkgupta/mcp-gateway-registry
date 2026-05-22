@@ -79,7 +79,7 @@ class StartupEvent(BaseModel):
     )
     compute: str = Field(
         default="unknown",
-        pattern="^(ecs|eks|kubernetes|docker|ec2|vm|unknown)$",
+        pattern="^(ecs|eks|kubernetes|docker|podman|ec2|vm|unknown)$",
         description="Compute platform",
     )
     mode: str = Field(
@@ -94,7 +94,7 @@ class StartupEvent(BaseModel):
     )
     storage: str = Field(
         ...,
-        pattern="^(file|documentdb|mongodb-ce)$",
+        pattern="^(file|documentdb|mongodb-ce|mongodb|mongodb-atlas)$",
         description="Storage backend",
     )
     auth: str = Field(..., min_length=1, max_length=50, description="Auth provider")
@@ -239,7 +239,7 @@ class HeartbeatEvent(BaseModel):
     )
     compute: str = Field(
         default="unknown",
-        pattern="^(ecs|eks|kubernetes|docker|ec2|vm|unknown)$",
+        pattern="^(ecs|eks|kubernetes|docker|podman|ec2|vm|unknown)$",
         description="Compute platform",
     )
     servers_count: int = Field(..., ge=0, description="Number of registered MCP servers")
