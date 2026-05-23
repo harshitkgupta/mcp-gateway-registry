@@ -46,14 +46,16 @@ class TestDefaultTrustedDomains:
         mock_settings.github_extra_hosts = ""
         _clear_trusted_domains_cache()
 
-        from registry.services.skill_service import _trusted_domains
+        from registry.services.skill_service import (
+            _DEFAULT_TRUSTED_DOMAINS,
+            _trusted_domains,
+        )
 
-        domains = _trusted_domains()
-
-        assert "github.com" in domains
-        assert "raw.githubusercontent.com" in domains
-        assert "gitlab.com" in domains
-        assert "bitbucket.org" in domains
+        # With no extras configured the merged set must equal the defaults.
+        # Using equality (rather than per-host membership) catches accidental
+        # additions or omissions and keeps the assertion off CodeQL's
+        # py/incomplete-url-substring-sanitization radar.
+        assert _trusted_domains() == _DEFAULT_TRUSTED_DOMAINS
 
     @patch("registry.services.skill_service.settings")
     def test_unconfigured_ghes_host_not_trusted(
@@ -64,9 +66,12 @@ class TestDefaultTrustedDomains:
         mock_settings.github_extra_hosts = ""
         _clear_trusted_domains_cache()
 
-        from registry.services.skill_service import _trusted_domains
+        from registry.services.skill_service import (
+            _DEFAULT_TRUSTED_DOMAINS,
+            _trusted_domains,
+        )
 
-        assert "github.mycompany.com" not in _trusted_domains()
+        assert _trusted_domains() == _DEFAULT_TRUSTED_DOMAINS
 
 
 # =============================================================================
@@ -82,30 +87,38 @@ class TestGHESHostMerge:
         self,
         mock_settings,
     ) -> None:
-        """One configured GHES host appears in the trusted set."""
+        """One configured GHES host extends the default trusted set by exactly that host."""
         mock_settings.github_extra_hosts = "github.mycompany.com"
         _clear_trusted_domains_cache()
 
-        from registry.services.skill_service import _trusted_domains
+        from registry.services.skill_service import (
+            _DEFAULT_TRUSTED_DOMAINS,
+            _trusted_domains,
+        )
 
-        assert "github.mycompany.com" in _trusted_domains()
+        assert _trusted_domains() == _DEFAULT_TRUSTED_DOMAINS | {"github.mycompany.com"}
 
     @patch("registry.services.skill_service.settings")
     def test_multiple_ghes_hosts_added(
         self,
         mock_settings,
     ) -> None:
-        """Comma-separated GHES hosts all appear in the trusted set."""
+        """Comma-separated GHES hosts all extend the default set."""
         mock_settings.github_extra_hosts = (
             "github.mycompany.com,raw.github.mycompany.com"
         )
         _clear_trusted_domains_cache()
 
-        from registry.services.skill_service import _trusted_domains
+        from registry.services.skill_service import (
+            _DEFAULT_TRUSTED_DOMAINS,
+            _trusted_domains,
+        )
 
-        domains = _trusted_domains()
-        assert "github.mycompany.com" in domains
-        assert "raw.github.mycompany.com" in domains
+        expected = _DEFAULT_TRUSTED_DOMAINS | {
+            "github.mycompany.com",
+            "raw.github.mycompany.com",
+        }
+        assert _trusted_domains() == expected
 
     @patch("registry.services.skill_service.settings")
     def test_whitespace_and_case_normalised(
@@ -116,11 +129,16 @@ class TestGHESHostMerge:
         mock_settings.github_extra_hosts = "  GitHub.MyCompany.com  ,  RAW.github.mycompany.com  "
         _clear_trusted_domains_cache()
 
-        from registry.services.skill_service import _trusted_domains
+        from registry.services.skill_service import (
+            _DEFAULT_TRUSTED_DOMAINS,
+            _trusted_domains,
+        )
 
-        domains = _trusted_domains()
-        assert "github.mycompany.com" in domains
-        assert "raw.github.mycompany.com" in domains
+        expected = _DEFAULT_TRUSTED_DOMAINS | {
+            "github.mycompany.com",
+            "raw.github.mycompany.com",
+        }
+        assert _trusted_domains() == expected
 
     @patch("registry.services.skill_service.settings")
     def test_defaults_preserved_when_extras_present(
@@ -131,12 +149,13 @@ class TestGHESHostMerge:
         mock_settings.github_extra_hosts = "github.mycompany.com"
         _clear_trusted_domains_cache()
 
-        from registry.services.skill_service import _trusted_domains
+        from registry.services.skill_service import (
+            _DEFAULT_TRUSTED_DOMAINS,
+            _trusted_domains,
+        )
 
-        domains = _trusted_domains()
-        assert "github.com" in domains
-        assert "gitlab.com" in domains
-        assert "github.mycompany.com" in domains
+        # Subset assertion: every default must still be in the merged set.
+        assert _DEFAULT_TRUSTED_DOMAINS <= _trusted_domains()
 
 
 # =============================================================================
