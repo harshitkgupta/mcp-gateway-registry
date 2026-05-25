@@ -15,6 +15,10 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys as _sys
+
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
 
 # Configure logging with basicConfig
 logging.basicConfig(
@@ -51,7 +55,7 @@ def _generate_chart(
     output_path: str,
 ) -> None:
     """Generate and save the lifetime density chart."""
-    sns.set_theme(style="whitegrid")
+    apply_tufte_style()
 
     fig, (ax_hist, ax_box, ax_bar) = plt.subplots(
         1,
@@ -209,6 +213,8 @@ def _generate_chart(
     max_count = max(counts) if counts else 1
     ax_bar.set_xlim(0, max_count * 1.4)
 
+    for _ax in fig.axes:
+        tufte_axes(_ax)
     plt.tight_layout(rect=[0, 0, 1, 0.93])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

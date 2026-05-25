@@ -19,6 +19,10 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys as _sys
+
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
 
 # Configure logging with basicConfig
 logging.basicConfig(
@@ -162,31 +166,86 @@ def _compute_daily_unique_installs(
     return result
 
 
+def _compute_daily_new_installs(
+    rows: list[dict[str, str]],
+) -> dict[str, list[tuple[str, int]]]:
+    """Compute daily NEW registry installs per cloud provider.
+
+    A "new install" is the first calendar day a given registry_id is ever
+    seen in the dataset. Each registry_id is counted exactly once, on its
+    first-seen date, under the cloud provider it reported on that date.
+
+    Distinct from _compute_daily_unique_installs which counts any instance
+    that emitted an event on the day (returning visitors get re-counted).
+    This function answers "how many brand-new deployments came online on
+    each day?" rather than "how many were active that day?".
+
+    Returns a dict keyed by cloud provider, each value is a sorted list
+    of (date_str, new_install_count_that_day) tuples.
+    """
+    # First pass: find each registry_id's earliest (date, cloud) pair.
+    earliest: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        rid = (row.get("registry_id") or "").strip()
+        if not rid:
+            continue
+        date = _extract_date(row.get("ts", ""))
+        if not date:
+            continue
+        cloud = row.get("cloud") or "unknown"
+        prior = earliest.get(rid)
+        if prior is None or date < prior[0]:
+            earliest[rid] = (date, cloud)
+
+    # Second pass: bucket by (cloud, date).
+    cloud_date_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for _rid, (date, cloud) in earliest.items():
+        cloud_date_counts[cloud][date] += 1
+
+    result = {}
+    for cloud, date_counts in cloud_date_counts.items():
+        sorted_dates = sorted(date_counts.keys())
+        result[cloud] = [(d, date_counts[d]) for d in sorted_dates]
+
+    return result
+
+
 def _generate_chart(
     cumulative_data: dict[str, list[tuple[str, int]]],
     daily_data: dict[str, list[tuple[str, int]]],
+    new_data: dict[str, list[tuple[str, int]]],
     output_path: str,
 ) -> None:
-    """Generate and save the timeseries chart with two subplots."""
-    sns.set_theme(style="whitegrid")
+    """Generate and save the timeseries chart with three subplots.
 
-    fig, (ax_cumulative, ax_daily) = plt.subplots(
-        2,
+    Top panel: cumulative unique installs per cloud (ever-seen running total).
+    Middle panel: daily unique active installs per cloud (any event that day).
+    Bottom panel: daily NEW installs per cloud (first-seen on that day only).
+    """
+    apply_tufte_style()
+
+    fig, (ax_cumulative, ax_daily, ax_new) = plt.subplots(
+        3,
         1,
-        figsize=(FIGURE_WIDTH, FIGURE_HEIGHT),
+        figsize=(FIGURE_WIDTH, FIGURE_HEIGHT * 1.4),
         sharex=True,
     )
     fig.suptitle(
         CHART_TITLE,
         fontsize=14,
         fontweight="bold",
-        y=0.98,
+        y=0.99,
     )
 
-    colors = sns.color_palette(LINE_PALETTE, len(cumulative_data))
+    # Use a stable colour map keyed on cloud provider so the same cloud
+    # gets the same colour in all three panels even if a panel's dict
+    # iteration order differs.
+    all_clouds = sorted(set(cumulative_data) | set(daily_data) | set(new_data))
+    palette = sns.color_palette(LINE_PALETTE, len(all_clouds))
+    cloud_color = {cloud: palette[i] for i, cloud in enumerate(all_clouds)}
 
     # Plot cumulative installs
-    for idx, (cloud, series) in enumerate(sorted(cumulative_data.items())):
+    for cloud, series in sorted(cumulative_data.items()):
         dates = [datetime.strptime(d, "%Y-%m-%d") for d, _ in series]
         counts = [c for _, c in series]
         ax_cumulative.plot(
@@ -196,16 +255,17 @@ def _generate_chart(
             markersize=5,
             linewidth=2,
             label=cloud,
-            color=colors[idx],
+            color=cloud_color[cloud],
         )
 
     ax_cumulative.set_ylabel("Cumulative Unique Installs")
-    ax_cumulative.set_title("Cumulative Unique Registry Installs", fontsize=11)
+    ax_cumulative.set_title("Cumulative Unique Registry Installs", loc="left", fontsize=11)
     ax_cumulative.legend(title="Cloud Provider", loc="upper left")
     ax_cumulative.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    tufte_axes(ax_cumulative)
 
     # Plot daily active installs
-    for idx, (cloud, series) in enumerate(sorted(daily_data.items())):
+    for cloud, series in sorted(daily_data.items()):
         dates = [datetime.strptime(d, "%Y-%m-%d") for d, _ in series]
         counts = [c for _, c in series]
         ax_daily.plot(
@@ -215,20 +275,41 @@ def _generate_chart(
             markersize=4,
             linewidth=2,
             label=cloud,
-            color=colors[idx],
+            color=cloud_color[cloud],
         )
 
-    ax_daily.set_ylabel("Daily Unique Installs")
-    ax_daily.set_title("Daily Active Registry Installs", fontsize=11)
+    ax_daily.set_ylabel("Daily Active Installs")
+    ax_daily.set_title("Daily Active Registry Installs", loc="left", fontsize=11)
     ax_daily.legend(title="Cloud Provider", loc="upper left")
     ax_daily.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    tufte_axes(ax_daily)
 
-    # Format x-axis dates
-    ax_daily.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-    ax_daily.xaxis.set_major_locator(mdates.DayLocator(interval=1))
-    plt.setp(ax_daily.xaxis.get_majorticklabels(), rotation=45, ha="right")
+    # Plot daily NEW installs (first-seen per day)
+    for cloud, series in sorted(new_data.items()):
+        dates = [datetime.strptime(d, "%Y-%m-%d") for d, _ in series]
+        counts = [c for _, c in series]
+        ax_new.plot(
+            dates,
+            counts,
+            marker="^",
+            markersize=4,
+            linewidth=2,
+            label=cloud,
+            color=cloud_color[cloud],
+        )
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    ax_new.set_ylabel("New Installs (first-seen)")
+    ax_new.set_title("Daily NEW Registry Installs (first-seen on that day)", loc="left", fontsize=11)
+    ax_new.legend(title="Cloud Provider", loc="upper left")
+    ax_new.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+    tufte_axes(ax_new)
+
+    # Format x-axis dates on the bottom panel
+    ax_new.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax_new.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+    plt.setp(ax_new.xaxis.get_majorticklabels(), rotation=45, ha="right")
+
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"Timeseries chart saved to {output_path}")
@@ -284,12 +365,13 @@ def main() -> None:
 
     cumulative_data = _compute_cumulative_installs(unique_rows)
     daily_data = _compute_daily_unique_installs(unique_rows)
+    new_data = _compute_daily_new_installs(unique_rows)
 
     if not cumulative_data:
         logger.error("No identified registry instances found in data")
         raise SystemExit(1)
 
-    _generate_chart(cumulative_data, daily_data, args.output)
+    _generate_chart(cumulative_data, daily_data, new_data, args.output)
 
 
 if __name__ == "__main__":

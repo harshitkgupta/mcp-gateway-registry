@@ -35,6 +35,10 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys as _sys
+
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -284,7 +288,7 @@ def _generate_chart(
     output_path: str,
 ) -> None:
     """Render the three-series line chart."""
-    sns.set_theme(style="whitegrid")
+    apply_tufte_style()
 
     fig, ax = plt.subplots(figsize=(FIGURE_WIDTH, FIGURE_HEIGHT))
     fig.suptitle(CHART_TITLE, fontsize=14, fontweight="bold", y=0.98)
@@ -313,6 +317,8 @@ def _generate_chart(
     ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(parsed) // 14)))
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right")
 
+    for _ax in fig.axes:
+        tufte_axes(_ax)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

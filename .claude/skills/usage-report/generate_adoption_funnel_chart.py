@@ -23,6 +23,10 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys as _sys
+
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,7 +94,7 @@ def _generate_chart(
     report_date: str,
 ) -> None:
     """Render the funnel as a horizontal bar chart, top of funnel at top."""
-    sns.set_theme(style="whitegrid")
+    apply_tufte_style()
 
     labels = [r[0] for r in rows]
     counts = [r[1] for r in rows]
@@ -136,6 +140,8 @@ def _generate_chart(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
+    for _ax in fig.axes:
+        tufte_axes(_ax)
     plt.tight_layout(rect=[0, 0, 1, 0.94])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

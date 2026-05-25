@@ -4,12 +4,16 @@ description: Generate a usage report for MCP Gateway Registry by SSHing into the
 license: Apache-2.0
 metadata:
   author: mcp-gateway-registry
-  version: "1.2"
+  version: "1.3"
 ---
 
 # Usage Report Skill
 
 Export telemetry data from the MCP Gateway Registry's DocumentDB telemetry collector and generate a usage report showing deployment patterns, version adoption, and feature usage in the wild.
+
+## Visualization Guidelines
+
+All charts in this skill follow Edward Tufte's principles documented in [tufte-viz-guidelines.md](tufte-viz-guidelines.md): high data-ink ratio, no chartjunk, layered information, honest scales. The shared style module [tufte_style.py](tufte_style.py) provides `apply_tufte_style()` (rcParams) and `tufte_axes(ax)` (per-axes cleanup). When adding new chart generators, import from `tufte_style` and call `apply_tufte_style()` once before plotting and `tufte_axes(ax)` for each axes after plotting. Reference the Tufte checklist in `tufte-viz-guidelines.md` before merging any new chart.
 
 ## Prerequisites
 
@@ -114,9 +118,10 @@ Generate a timeseries chart showing unique registry installs per cloud provider 
   --exclude-incomplete-day YYYY-MM-DD
 ```
 
-This produces a PNG with two subplots:
+This produces a PNG with three subplots:
 - **Cumulative Unique Registry Installs** -- running total of unique registry_ids per cloud provider
-- **Daily Active Registry Installs** -- unique registry_ids seen each day per cloud provider
+- **Daily Active Registry Installs** -- unique registry_ids seen each day per cloud provider (returning instances are re-counted)
+- **Daily NEW Registry Installs (first-seen)** -- unique registry_ids whose earliest-ever event lands on each day, per cloud provider. Each instance is counted exactly once across the entire history. Use this to track raw acquisition velocity per cloud, isolated from churn and re-engagement
 
 > **`--exclude-incomplete-day`** drops events on the given date (today's date, the in-progress day) before charting so the trailing data point doesn't show a misleading dip. Always pass today's `YYYY-MM-DD`. Snapshot tables and headline tallies still see the full data; only the chart series are trimmed.
 
@@ -272,7 +277,27 @@ Visualize the conversion funnel from total installs through retention stages to 
 
 Embed the chart in the report's **Adoption Funnel** section (placed after Most Engaged Operators, before Recommendations). Include a table showing each funnel stage, count, and percentage of the previous stage.
 
-### Step 5f: Fetch GitHub Repository Stats
+### Step 5f: Generate Cloud-Detection-by-Version Chart
+
+Plot how the `cloud_detection_method` outcome distributes per registry version. Each row is a version (top 12 by instance count plus a rolled-up "other"); each row is a stacked horizontal bar split by detection-method outcome (env, dmi, ecs_meta, k8s_heuristic, imds, unknown, "(field absent)" for pre-1.23.0).
+
+This chart lets the report validate that fixes to cloud detection (issue #1093, PR #1106 in 1.24.2) actually moved the needle: the "unknown" red slice should shrink on the row for the version where the fix shipped, relative to older versions on the same chart.
+
+```bash
+/usr/bin/python3 .claude/skills/usage-report/generate_detection_by_version_chart.py \
+  --csv $DATE_DIR/registry_metrics.csv \
+  --output $DATE_DIR/detection-by-version-YYYY-MM-DD.png \
+  --csv-out $DATE_DIR/detection-by-version-YYYY-MM-DD.csv \
+  --snapshot-date YYYY-MM-DD
+```
+
+Outputs:
+- PNG chart with versions on the y-axis (sorted by instance count, largest at top), detection methods stacked on the x-axis with green-for-success / red-for-unknown / grey-for-field-absent colour coding.
+- CSV sidecar with one row per version, columns for each detection method count, plus a total. Useful for diffing across reports.
+
+Embed the chart in a section titled "Cloud Detection Outcomes by Version" placed after Adoption Funnel and before Recommendations. Add a short narrative quoting the row for the latest release (`1.24.2` and later) and contrasting it with `1.23.0` and `1.24.1` to show whether the fix is working in the wild on instances that adopted it.
+
+### Step 5g: Fetch GitHub Repository Stats
 
 Collect community-growth signals for the upstream repo (`agentic-community/mcp-gateway-registry`) using the authenticated `gh` CLI. These numbers complement telemetry by showing project interest outside of deployed instances.
 
@@ -511,6 +536,11 @@ Summary table from `ltv-spend-YYYY-MM-DD.json`. Show yesterday, last-7-days, and
 
 Table showing each funnel stage (total installs, multi-day, sticky 3+, weekly 7+, biweekly 14+, monthly 30+, confirmed alive) with count and % of previous stage.
 
+## Cloud Detection Outcomes by Version
+![Cloud Detection by Version](detection-by-version-YYYY-MM-DD.png)
+
+Stacked-bar view of `cloud_detection_method` outcomes split by registry version. Quote the row for the latest release and contrast it with `1.23.0` and `1.24.1` to validate whether issue #1093 / PR #1106 is actually moving the unknown-cloud rate down on instances that adopted the fix.
+
 ## GitHub Repository
 Table with stars, forks, contributors, open issues. Deltas vs previous report.
 
@@ -526,9 +556,9 @@ Event-count-based distribution tables for cloud, compute, architecture, storage,
 
 #### Mandatory Charts Checklist
 
-The report MUST embed all 10 charts. If any chart file is missing, generate it before writing the report.
+The report MUST embed all 11 charts. If any chart file is missing, generate it before writing the report.
 
-1. `registry-installs-timeseries-YYYY-MM-DD.png` (cloud provider cumulative + daily)
+1. `registry-installs-timeseries-YYYY-MM-DD.png` (cloud provider: cumulative + daily-active + daily-new)
 2. `instance-distribution-YYYY-MM-DD.png` (6-panel faceted, all customers)
 3. `instance-distribution-active-PREVIOUS-YYYY-MM-DD.png` (6-panel faceted, active yesterday)
 4. `instance-lifetime-YYYY-MM-DD.png` (age histogram + boxplot + buckets)
@@ -538,6 +568,7 @@ The report MUST embed all 10 charts. If any chart file is missing, generate it b
 8. `install-forecast-YYYY-MM-DD.png` (OLS + recent-pace to 1,000)
 9. `ltv-spend-YYYY-MM-DD.png` (daily compute + bedrock + cumulative)
 10. `adoption-funnel-YYYY-MM-DD.png` (funnel from total to confirmed-alive)
+11. `detection-by-version-YYYY-MM-DD.png` (cloud_detection_method outcomes per version)
 
 Save the report to `$DATE_DIR/ai-registry-usage-report-YYYY-MM-DD.md`.
 
