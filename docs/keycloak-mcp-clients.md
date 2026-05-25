@@ -1,4 +1,14 @@
-# Keycloak as the IdP for MCP Gateway Registry
+# Keycloak: MCP Client Guide (DCR + OAuth)
+
+> **Scope of this doc**: How a spec-compliant MCP client (Claude Code,
+> Claude.ai connectors, Cursor) authenticates against the gateway via
+> Dynamic Client Registration and OAuth when Keycloak is the configured
+> identity provider.
+>
+> **Looking for agent service accounts or operations?** For agent-to-gateway
+> M2M authentication using Keycloak service accounts, plus operational
+> procedures (backup/restore, agent lifecycle, monitoring), see the
+> companion doc: [Keycloak: Agent M2M & Operations Guide](keycloak-agent-m2m.md).
 
 This doc explains how a spec-compliant MCP client (Claude Code, Claude.ai
 connectors, Cursor) authenticates against the gateway when Keycloak is the

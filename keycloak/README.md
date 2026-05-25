@@ -210,4 +210,6 @@ After setting up Keycloak:
 2. Configure your AI agents: See [Agent Configuration](../agents/README.md)
 3. Test the integration: See [Testing Guide](../docs/testing.md)
 
-For detailed documentation, see [Keycloak Integration Guide](../docs/keycloak-integration.md)
+For detailed documentation, see:
+- [Keycloak: Agent M2M & Operations Guide](../docs/keycloak-agent-m2m.md) - service accounts, ops procedures, agent lifecycle
+- [Keycloak: MCP Client Guide](../docs/keycloak-mcp-clients.md) - DCR, OAuth flows, end-user MCP client setup

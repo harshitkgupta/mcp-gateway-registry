@@ -565,7 +565,9 @@ uv run python credentials-provider/token_refresher.py
 uv run python credentials-provider/token_refresher.py --agent-id sre-agent
 ```
 
-For detailed Keycloak integration documentation, see [Keycloak Integration Guide](keycloak-integration.md).
+For detailed Keycloak integration documentation, see:
+- [Keycloak: Agent M2M & Operations Guide](keycloak-agent-m2m.md) - service accounts, ops, agent token lifecycle
+- [Keycloak: MCP Client Guide](keycloak-mcp-clients.md) - DCR, OAuth flows for Claude Code/Cursor/Roo Code/Kiro
 
 ---
 

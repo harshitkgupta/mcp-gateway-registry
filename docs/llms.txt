@@ -2454,7 +2454,9 @@ Before submitting code, verify:
 - [Installation Guide](docs/installation.md) - Complete setup instructions for EC2 and EKS
 - [Configuration Reference](docs/configuration.md) - Environment variables and settings
 - [Authentication Guide](docs/auth.md) - OAuth and identity provider integration
-- [Keycloak Integration](docs/keycloak-integration.md) - Enterprise identity with agent audit trails
+- [AI Coding Assistant Registry Integration](docs/ai-coding-assistant-registry-integration.md) - One-command DCR + OAuth for Claude Code and Claude.ai
+- [Keycloak: Agent M2M & Operations Guide](docs/keycloak-agent-m2m.md) - Enterprise identity, service accounts, agent audit trails
+- [Keycloak: MCP Client Guide](docs/keycloak-mcp-clients.md) - DCR and OAuth flows for end-user MCP clients
 - [Amazon Cognito Setup](docs/cognito.md) - Step-by-step IdP configuration
 - [Fine-Grained Access Control](docs/scopes.md) - Permission management and security
 - [Dynamic Tool Discovery](docs/dynamic-tool-discovery.md) - Autonomous agent capabilities

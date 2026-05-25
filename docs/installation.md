@@ -8,7 +8,7 @@ Complete installation instructions for the MCP Gateway & Registry on various pla
 - **Container Runtime**: Choose one:
   - **Docker & Docker Compose**: Standard container runtime
   - **Podman & Podman Compose**: Rootless alternative (recommended for macOS)
-- **Amazon Cognito or Keycloak**: Identity provider for authentication (see [Cognito Setup Guide](cognito.md) or [Keycloak Integration](keycloak-integration.md))
+- **Amazon Cognito or Keycloak**: Identity provider for authentication (see [Cognito Setup Guide](cognito.md), [Keycloak: MCP Client Guide](keycloak-mcp-clients.md), or [Keycloak: Agent M2M & Operations Guide](keycloak-agent-m2m.md))
 - **SSL Certificate**: Optional for HTTPS deployment in production
 
 ## Quick Start

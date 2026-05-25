@@ -380,7 +380,7 @@ These files are involved in the automatic setup:
 
 - [Authentication Guide](auth.md) - General authentication and authorization
 - [CLI Reference](cli.md) - Command-line interface documentation
-- [Keycloak Integration](keycloak-integration.md) - Keycloak configuration details
+- [Keycloak: Agent M2M & Operations Guide](keycloak-agent-m2m.md) - Keycloak configuration details for agent service accounts
 
 ## Environment Variables
 

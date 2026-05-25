@@ -1314,7 +1314,8 @@ curl -f https://mcpgateway.mycorp.com/realms/mcp-gateway
 ### Documentation Resources
 
 - [Authentication Guide](auth.md) - Deep dive into authentication options
-- [Keycloak Advanced Configuration](keycloak-integration.md) - Enterprise features
+- [Keycloak: Agent M2M & Operations Guide](keycloak-agent-m2m.md) - service accounts and ops
+- [Keycloak: MCP Client Guide](keycloak-mcp-clients.md) - DCR and OAuth flows for end-user MCP clients
 - [API Reference](registry_api.md) - Programmatic registry management
 - [Dynamic Tool Discovery](dynamic-tool-discovery.md) - AI agent capabilities
 - [AWS ECS Deployment](../terraform/aws-ecs/README.md) - Deployment best practices

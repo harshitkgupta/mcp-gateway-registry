@@ -267,5 +267,6 @@ After modifying group permissions:
 - [Scopes Management](scopes-mgmt.md) - Detailed scope configuration format
 - [Authentication Design](design/authentication-design.md) - Architecture overview
 - [IdP Provider Architecture](design/idp-provider-support.md) - Multi-provider support details
-- [Keycloak Integration](keycloak-integration.md) - Keycloak setup guide
+- [Keycloak: MCP Client Guide](keycloak-mcp-clients.md) - DCR, OAuth flows, end-user MCP clients
+- [Keycloak: Agent M2M & Operations Guide](keycloak-agent-m2m.md) - service accounts and operations
 - [Entra ID Setup](entra-id-setup.md) - Microsoft Entra ID configuration

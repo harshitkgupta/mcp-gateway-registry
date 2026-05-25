@@ -39,7 +39,9 @@ mkdocs build
 - `installation.md` - Complete installation guide
 - `auth.md` - Authentication and OAuth setup
 - `cognito.md` - Amazon Cognito configuration
-- `keycloak-integration.md` - Keycloak integration guide
+- `keycloak-agent-m2m.md` - Keycloak agent M2M and operations guide (service accounts, ops)
+- `keycloak-mcp-clients.md` - Keycloak guide for end-user MCP clients (DCR, OAuth flows)
+- `ai-coding-assistant-registry-integration.md` - One-command DCR setup for Claude Code, Claude.ai (umbrella: #988)
 - `scopes.md` - Access control and permissions
 - `registry_api.md` - API reference
 - `dynamic-tool-discovery.md` - AI agent tool discovery

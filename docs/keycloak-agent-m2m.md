@@ -1,4 +1,13 @@
-# Keycloak Integration Documentation
+# Keycloak: Agent M2M & Operations Guide
+
+> **Scope of this doc**: Keycloak setup for **agent-to-gateway machine-to-machine
+> (M2M) authentication** using service accounts, plus operational procedures
+> (start/stop, backup/restore, agent lifecycle, monitoring).
+>
+> **Looking for end-user MCP clients?** If you're trying to get Claude Code,
+> Claude.ai connectors, Cursor, Roo Code, or Kiro talking to the gateway via
+> Dynamic Client Registration (DCR) and OAuth, see the companion doc:
+> [Keycloak: MCP Client Guide](keycloak-mcp-clients.md).
 
 ## Overview
 
@@ -88,30 +97,28 @@ mcp-gateway (realm)
 
 ### Required Environment Variables
 
+Every variable below is verified consumed by code in this repo. Variables that
+appeared in earlier revisions of this doc but had no code reference (e.g.
+`KEYCLOAK_DB_VENDOR`, `KEYCLOAK_HOSTNAME_STRICT`, `KEYCLOAK_AGENT_CLIENT_ID`,
+`AGENT_TYPE`, `AGENT_VERSION`, `AUTH_LOG_FORMAT`, `TOKEN_CACHE_TTL`,
+`TOKEN_REFRESH_THRESHOLD`) have been removed.
+
 #### 1. Docker Compose (.env)
 ```bash
-# Keycloak Database Configuration
-KEYCLOAK_DB_VENDOR=postgres
-KEYCLOAK_DB_ADDR=postgres
-KEYCLOAK_DB_DATABASE=keycloak
-KEYCLOAK_DB_USER=keycloak
-KEYCLOAK_DB_PASSWORD=<YOUR_SECURE_DB_PASSWORD>
-
-# Keycloak Admin Configuration
-KEYCLOAK_ADMIN=admin
-KEYCLOAK_ADMIN_PASSWORD=<YOUR_SECURE_ADMIN_PASSWORD>
-
-# Keycloak Runtime Configuration
-KEYCLOAK_HOSTNAME=mcpgateway.ddns.net
-KEYCLOAK_HOSTNAME_STRICT=false
-KEYCLOAK_HOSTNAME_STRICT_HTTPS=false
-KC_PROXY=edge
-KC_HTTP_ENABLED=true
-
-# PostgreSQL Database Configuration
+# Keycloak Database (consumed by docker-compose.yml)
 POSTGRES_DB=keycloak
 POSTGRES_USER=keycloak
 POSTGRES_PASSWORD=<YOUR_SECURE_DB_PASSWORD>
+KEYCLOAK_DB_PASSWORD=<YOUR_SECURE_DB_PASSWORD>
+
+# Keycloak Admin (consumed by init-keycloak.sh and other setup scripts)
+KEYCLOAK_ADMIN=admin
+KEYCLOAK_ADMIN_PASSWORD=<YOUR_SECURE_ADMIN_PASSWORD>
+
+# Keycloak Runtime
+KEYCLOAK_HOSTNAME=mcpgateway.ddns.net   # consumed by keycloak/setup/disable-ssl.sh
+KC_PROXY=edge                           # consumed by docker-compose.yml
+KC_HTTP_ENABLED=true                    # consumed by docker-compose.yml
 ```
 
 #### 2. Auth Server Configuration (.env or docker-compose)
@@ -119,97 +126,78 @@ POSTGRES_PASSWORD=<YOUR_SECURE_DB_PASSWORD>
 # Authentication Provider Selection
 AUTH_PROVIDER=keycloak
 
-# Keycloak Connection Details
+# Keycloak Connection Details (consumed by auth_server/providers/keycloak.py)
 KEYCLOAK_URL=https://mcpgateway.ddns.net
 KEYCLOAK_REALM=mcp-gateway
 KEYCLOAK_CLIENT_ID=mcp-gateway-m2m
 KEYCLOAK_CLIENT_SECRET=<generated-by-keycloak>
 
-# M2M Client Configuration (optional, defaults to main client)
+# M2M Client Configuration (separate confidential client used by federation/M2M flows)
 KEYCLOAK_M2M_CLIENT_ID=mcp-gateway-m2m
 KEYCLOAK_M2M_CLIENT_SECRET=<generated-by-keycloak>
-
 ```
 
 #### 3. Credentials Provider Configuration
 ```bash
-# Token Storage Configuration
+# Token storage location (consumed by credentials-provider/)
 OAUTH_TOKENS_DIR=.oauth-tokens
 
-# Keycloak M2M Token Configuration
-KEYCLOAK_URL=https://mcpgateway.ddns.net/keycloak
+# Keycloak M2M Token Configuration (same vars as auth server, re-read by the helper scripts)
+KEYCLOAK_URL=https://mcpgateway.ddns.net
 KEYCLOAK_REALM=mcp-gateway
 KEYCLOAK_CLIENT_ID=mcp-gateway-m2m
 KEYCLOAK_CLIENT_SECRET=<generated-by-keycloak>
-
-# Token Refresh Settings
-TOKEN_REFRESH_THRESHOLD=60  # Refresh when less than 60 seconds remaining
-TOKEN_CACHE_TTL=300         # Cache tokens for 300 seconds (5 minutes)
 ```
 
 #### 4. Agent-Specific Configuration (per agent)
 ```bash
-# Agent Identification
+# Consumed by keycloak/setup/setup-agent-service-account.sh
 AGENT_ID=sre-agent
-AGENT_TYPE=claude
-AGENT_VERSION=1.0.0
-
-# Keycloak Agent Configuration
-KEYCLOAK_AGENT_CLIENT_ID=mcp-gateway-m2m
-KEYCLOAK_AGENT_SERVICE_ACCOUNT=agent-sre-agent-m2m
-KEYCLOAK_AGENT_GROUP=mcp-servers-unrestricted
-
-# Token File Location
 AGENT_TOKEN_FILE=.oauth-tokens/agent-sre-agent.json
 ```
 
+The agent's Keycloak group membership is set when you run
+`setup-agent-service-account.sh --agent-id <id> --group <group>`; there is no
+separate env var for it.
+
 ### Configuration File Templates
 
-#### .env.keycloak (Main Configuration)
+#### .env (main configuration consumed by docker-compose)
 ```bash
-# Keycloak Service Configuration
+# Provider selection
+AUTH_PROVIDER=keycloak
+
+# Keycloak service
 KEYCLOAK_URL=https://mcpgateway.ddns.net
 KEYCLOAK_REALM=mcp-gateway
 KEYCLOAK_ADMIN=admin
 KEYCLOAK_ADMIN_PASSWORD=<YOUR_SECURE_ADMIN_PASSWORD>
 
-# Database Configuration
-KEYCLOAK_DB_VENDOR=postgres
-KEYCLOAK_DB_ADDR=postgres
-KEYCLOAK_DB_DATABASE=keycloak
-KEYCLOAK_DB_USER=keycloak
+# Database
+POSTGRES_DB=keycloak
+POSTGRES_USER=keycloak
+POSTGRES_PASSWORD=<YOUR_SECURE_DB_PASSWORD>
 KEYCLOAK_DB_PASSWORD=<YOUR_SECURE_DB_PASSWORD>
 
-# M2M Client Configuration
+# Clients
 KEYCLOAK_CLIENT_ID=mcp-gateway-m2m
 KEYCLOAK_CLIENT_SECRET=<to-be-generated>
 KEYCLOAK_M2M_CLIENT_ID=mcp-gateway-m2m
 KEYCLOAK_M2M_CLIENT_SECRET=<to-be-generated>
 
-# Proxy Configuration
+# Runtime
+KEYCLOAK_HOSTNAME=mcpgateway.ddns.net
 KC_PROXY=edge
 KC_HTTP_ENABLED=true
-KEYCLOAK_HOSTNAME_STRICT=false
-KEYCLOAK_HOSTNAME_STRICT_HTTPS=false
-```
 
-#### .env.auth-server (Auth Server Configuration)
-```bash
-# Authentication Provider
-AUTH_PROVIDER=keycloak
-
-# Keycloak Integration
-KEYCLOAK_URL=https://mcpgateway.ddns.net
-KEYCLOAK_REALM=mcp-gateway
-KEYCLOAK_CLIENT_ID=mcp-gateway-m2m
-KEYCLOAK_CLIENT_SECRET=<from-keycloak>
-
-# Scopes Configuration
-SCOPES_CONFIG_PATH=scopes.yml
-
-# Logging Configuration
+# Auth server logging
 LOG_LEVEL=INFO
-AUTH_LOG_FORMAT=%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s,%(message)s
+
+# Scope config (LEGACY: only used when storage_backend is the
+# file backend in registry/common/scopes_loader.py. Production
+# uses DocumentDB and ignores this var. Kept here for
+# completeness; new installs do not need to set it.)
+SCOPES_CONFIG_PATH=scopes.yml
 ```
 
 ## Setup & Installation
@@ -238,17 +226,20 @@ AUTH_LOG_FORMAT=%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s
 # Clone repository and navigate to project
 cd /path/to/mcp-gateway-registry
 
-# Start prerequisite services
-docker-compose up -d postgres
-
-# Wait for PostgreSQL to be ready
-sleep 10
-
-# Start Keycloak
+# Start the Keycloak database, then Keycloak. The keycloak service
+# already declares 'depends_on: keycloak-db (service_healthy)', so
+# 'docker-compose up -d keycloak' is enough; the explicit step below
+# just makes ordering obvious.
+docker-compose up -d keycloak-db
 docker-compose up -d keycloak
 
-# Wait for Keycloak to initialize (may take 2-3 minutes)
-sleep 120
+# Wait for Keycloak's readiness probe to pass. Compose's healthcheck
+# usually clears within 30-60s on a clean machine, longer on first
+# pull. Poll instead of guessing:
+until curl -fs http://localhost:8080/health/ready >/dev/null; do
+  echo "waiting for keycloak..."
+  sleep 5
+done
 ```
 
 #### 2. Environment Variables Setup
@@ -366,22 +357,17 @@ tail -f token_refresher.log
 
 #### Complete Stack Startup
 ```bash
-# 1. Start database first
-docker-compose up -d postgres
-
-# 2. Wait for database ready
-sleep 10
-
-# 3. Start Keycloak
-docker-compose up -d keycloak
-
-# 4. Wait for Keycloak initialization
-sleep 120
-
-# 5. Start remaining services
+# Bring up the whole stack. The compose file declares the correct
+# 'depends_on: condition: service_healthy' relationships between
+# keycloak-db, keycloak, and the rest, so a single 'up' is enough.
 docker-compose up -d
 
-# 6. Verify all services
+# Watch readiness instead of sleeping a fixed time:
+until curl -fs http://localhost:8080/health/ready >/dev/null; do
+  echo "waiting for keycloak..."
+  sleep 5
+done
+
 docker-compose ps
 docker-compose logs --tail=20
 ```
@@ -394,8 +380,8 @@ curl -f http://localhost:8080/health/ready
 # Auth server health
 curl -f http://localhost:8000/health
 
-# PostgreSQL connection
-docker-compose exec postgres pg_isready -U keycloak
+# Keycloak Postgres connection (service is named keycloak-db)
+docker-compose exec keycloak-db pg_isready -U keycloak
 
 # Complete service status
 docker-compose ps --format table
@@ -482,17 +468,18 @@ uv run uv run python credentials-provider/token_refresher.py --agent-id <agent-i
 ```
 
 #### Updating Scopes Configuration
+
+Scopes/permissions live in DocumentDB (collection: `scopes`), not in
+`auth_server/scopes.yml`. Edit them through the registry UI's "IAM
+Settings" page, or via the registry API directly. Auth server picks up
+changes on its next reload (no compose restart required for DB-backed
+edits). To verify:
+
 ```bash
-# 1. Edit scopes configuration
-nano auth_server/scopes.yml
+# Tail auth server logs to confirm scope reload
+docker-compose logs -f auth-server | grep -i scope
 
-# 2. Restart auth server to pick up changes
-docker-compose restart auth-server
-
-# 3. Verify changes took effect
-docker-compose logs auth-server | grep -i scope
-
-# 4. Test authorization with updated scopes
+# Test authorization with updated scopes
 ./test-keycloak-mcp.sh --agent-id <agent-id>
 ```
 
@@ -860,12 +847,13 @@ docker system prune -f
 BACKUP_DIR="backups/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$BACKUP_DIR"
 
-# Backup database
-docker-compose exec postgres pg_dump -U keycloak keycloak > "$BACKUP_DIR/keycloak.sql"
+# Backup database (compose service is 'keycloak-db', not 'postgres')
+docker-compose exec keycloak-db pg_dump -U keycloak keycloak > "$BACKUP_DIR/keycloak.sql"
 
-# Backup configuration
+# Backup configuration. NOTE: scopes/permissions live in DocumentDB now,
+# not in auth_server/scopes.yml. Use the registry export tooling to back
+# those up; do not assume scopes.yml exists on a current install.
 cp -r keycloak/setup "$BACKUP_DIR/"
-cp auth_server/scopes.yml "$BACKUP_DIR/"
 cp docker-compose.yml "$BACKUP_DIR/"
 
 # Backup tokens (optional)
@@ -889,14 +877,16 @@ fi
 # Stop services
 docker-compose down
 
-# Restore database
-docker-compose up -d postgres
-sleep 10
-docker-compose exec -T postgres psql -U keycloak -d keycloak < "$BACKUP_DIR/keycloak.sql"
+# Restore database (service is 'keycloak-db')
+docker-compose up -d keycloak-db
+until docker-compose exec keycloak-db pg_isready -U keycloak >/dev/null 2>&1; do
+  sleep 2
+done
+docker-compose exec -T keycloak-db psql -U keycloak -d keycloak < "$BACKUP_DIR/keycloak.sql"
 
-# Restore configuration
+# Restore configuration. Scopes are now stored in DocumentDB; restore
+# them via the registry's import tooling rather than copying a file.
 cp -r "$BACKUP_DIR/setup" keycloak/
-cp "$BACKUP_DIR/scopes.yml" auth_server/
 cp "$BACKUP_DIR/docker-compose.yml" .
 
 # Start services
@@ -958,12 +948,13 @@ cat .oauth-tokens/agent-<id>.json | jq '.expires_at_human'
 ### Important Files
 ```
 keycloak/setup/                    # Setup scripts
-auth_server/scopes.yml             # Authorization configuration  
 .oauth-tokens/                     # Token storage
-docs/keycloak-integration.md       # This documentation
+docs/keycloak-agent-m2m.md         # This documentation
 docker-compose.yml                 # Service orchestration
-.env                              # Environment configuration
+.env                               # Environment configuration
 ```
+
+(Authorization scopes are stored in DocumentDB, not in a config file.)
 
 ### Service URLs
 - **Keycloak Admin**: https://mcpgateway.ddns.net/admin
