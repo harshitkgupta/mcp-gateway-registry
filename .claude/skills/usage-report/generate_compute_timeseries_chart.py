@@ -24,6 +24,10 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys as _sys
+
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -237,7 +241,7 @@ def _generate_chart(
     output_path: str,
 ) -> None:
     """Generate and save the timeseries chart with two subplots."""
-    sns.set_theme(style="whitegrid")
+    apply_tufte_style()
 
     fig, (ax_cumulative, ax_daily) = plt.subplots(
         2,
@@ -294,6 +298,8 @@ def _generate_chart(
     ax_daily.xaxis.set_major_locator(mdates.DayLocator(interval=1))
     plt.setp(ax_daily.xaxis.get_majorticklabels(), rotation=45, ha="right")
 
+    for _ax in fig.axes:
+        tufte_axes(_ax)
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)

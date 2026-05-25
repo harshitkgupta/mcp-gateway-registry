@@ -17,6 +17,10 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import seaborn as sns
+import sys as _sys
+
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tufte_style import apply_tufte_style, tufte_axes  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,9 +102,16 @@ def _get_latest_per_instance(
 
 def _compute_distributions(
     instances: list[dict[str, str]],
+    include_extended: bool = False,
 ) -> dict[str, Counter]:
-    """Compute value counts for each dimension based on unique instances."""
-    dimensions = {
+    """Compute value counts for each dimension based on unique instances.
+
+    When include_extended is True, three additional facets are included:
+    Registry Version, Embeddings Backend, and Cloud Detection Method. These
+    are most useful for the "new installs that day" view since they reveal
+    what the latest installs are reporting.
+    """
+    dimensions: dict[str, Counter] = {
         "Cloud Provider": Counter(),
         "Compute Platform": Counter(),
         "Storage Backend": Counter(),
@@ -108,6 +119,10 @@ def _compute_distributions(
         "Architecture": Counter(),
         "Deployment Mode": Counter(),
     }
+    if include_extended:
+        dimensions["Registry Version"] = Counter()
+        dimensions["Embeddings Backend"] = Counter()
+        dimensions["Cloud Detection Method"] = Counter()
 
     for row in instances:
         cloud = row.get("cloud", "unknown") or "unknown"
@@ -132,6 +147,16 @@ def _compute_distributions(
 
         mode = row.get("mode", "unknown") or "unknown"
         dimensions["Deployment Mode"][mode] += 1
+
+        if include_extended:
+            version = (row.get("v") or "").strip() or "unknown"
+            dimensions["Registry Version"][version] += 1
+
+            ebk = (row.get("embeddings_backend_kind") or "").strip() or "unknown"
+            dimensions["Embeddings Backend"][ebk] += 1
+
+            cdm = (row.get("cloud_detection_method") or "").strip() or "unknown"
+            dimensions["Cloud Detection Method"][cdm] += 1
 
     return dimensions
 
@@ -205,26 +230,102 @@ def _filter_rows_active_on_date(
     return kept
 
 
+def _filter_rows_new_on_date(
+    rows: list[dict[str, str]],
+    new_date: str,
+    range_start: str | None = None,
+) -> list[dict[str, str]]:
+    """Restrict the row set to instances first-seen on (or in a window ending on) new_date.
+
+    "First-seen" means the instance's earliest event in the dataset has a
+    timestamp date matching the filter. When range_start is None, the
+    filter matches a single day. When range_start is provided, the filter
+    matches first-seen dates in [range_start, new_date] inclusive. This
+    answers "what are the brand-new installs from that period reporting?"
+    rather than "who is still active?".
+
+    Returns ALL events for the surviving registry_ids so the latest-event
+    logic in _get_latest_per_instance can still resolve fields that vary
+    by event type (e.g. auth from startups, embeddings from heartbeats).
+    """
+    earliest_per_id: dict[str, str] = {}
+    for row in rows:
+        rid = (row.get("registry_id") or "").strip()
+        if not rid:
+            continue
+        ts = (row.get("ts") or "")[:10]
+        if not ts:
+            continue
+        prior = earliest_per_id.get(rid)
+        if prior is None or ts < prior:
+            earliest_per_id[rid] = ts
+
+    if range_start:
+        new_ids = {
+            rid for rid, ts in earliest_per_id.items()
+            if range_start <= ts <= new_date
+        }
+        label = f"first-seen in {range_start}..{new_date}"
+    else:
+        new_ids = {rid for rid, ts in earliest_per_id.items() if ts == new_date}
+        label = f"first-seen on {new_date}"
+
+    if not new_ids:
+        logger.warning(
+            f"No instances {label}; returning empty row set",
+        )
+        return []
+
+    kept = [r for r in rows if (r.get("registry_id") or "").strip() in new_ids]
+    logger.info(
+        f"New {label}: {len(new_ids)} unique instances "
+        f"(filtered {len(rows)} -> {len(kept)} events for those instances' full history)"
+    )
+    return kept
+
+
 def _generate_chart(
     rows: list[dict[str, str]],
     output_path: str,
     active_on_date: str | None = None,
+    new_on_date: str | None = None,
+    new_range_start: str | None = None,
+    include_extended_facets: bool = False,
 ) -> None:
     """Generate and save the faceted distribution chart.
 
     When active_on_date (YYYY-MM-DD) is provided, the chart shows only
-    those instances that reported at least one event on that date. The
-    title is annotated to make this explicit.
+    those instances that reported at least one event on that date. When
+    new_on_date is provided, the chart shows only instances first-seen
+    on that date (brand-new installs).
+
+    When include_extended_facets is True, the chart adds Registry Version,
+    Embeddings Backend, and Cloud Detection Method panels (9 total facets
+    instead of 6). This is the default for the new-installs view since
+    those facets are most diagnostic for fresh deployments.
     """
     instances = _get_latest_per_instance(rows)
     total = len(instances)
 
-    distributions = _compute_distributions(instances)
+    distributions = _compute_distributions(instances, include_extended=include_extended_facets)
 
-    sns.set_theme(style="whitegrid")
+    apply_tufte_style()
 
-    fig, axes = plt.subplots(2, 3, figsize=(FIGURE_WIDTH, FIGURE_HEIGHT))
-    if active_on_date:
+    if include_extended_facets:
+        fig, axes = plt.subplots(3, 3, figsize=(FIGURE_WIDTH, FIGURE_HEIGHT * 1.4))
+        cols = 3
+    else:
+        fig, axes = plt.subplots(2, 3, figsize=(FIGURE_WIDTH, FIGURE_HEIGHT))
+        cols = 3
+
+    if new_on_date and new_range_start:
+        title_suffix = (
+            f"\n(New installs {new_range_start} to {new_on_date}: "
+            f"{total} unique instances)"
+        )
+    elif new_on_date:
+        title_suffix = f"\n(New installs on {new_on_date}: {total} unique instances)"
+    elif active_on_date:
         title_suffix = f"\n(Active on {active_on_date}: {total} unique instances)"
     else:
         title_suffix = f"\n({total} unique instances)"
@@ -232,7 +333,7 @@ def _generate_chart(
         f"{CHART_TITLE}{title_suffix}",
         fontsize=14,
         fontweight="bold",
-        y=0.98,
+        y=0.99,
     )
 
     dimension_order = [
@@ -243,14 +344,22 @@ def _generate_chart(
         "Architecture",
         "Deployment Mode",
     ]
+    if include_extended_facets:
+        dimension_order += [
+            "Registry Version",
+            "Embeddings Backend",
+            "Cloud Detection Method",
+        ]
 
     for idx, dim_name in enumerate(dimension_order):
-        row_idx = idx // 3
-        col_idx = idx % 3
+        row_idx = idx // cols
+        col_idx = idx % cols
         ax = axes[row_idx][col_idx]
         _plot_single_facet(ax, distributions[dim_name], dim_name, total)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    for _ax in fig.axes:
+        tufte_axes(_ax)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     logger.info(f"Chart saved to {output_path}")
@@ -281,7 +390,41 @@ def main() -> None:
             "deployed' snapshot rather than 'who has ever been deployed'."
         ),
     )
+    parser.add_argument(
+        "--new-on-date",
+        default=None,
+        help=(
+            "Optional YYYY-MM-DD. When provided, the chart is restricted to "
+            "instances first-seen on that date (brand-new installs). Implies "
+            "--include-extended-facets unless that flag is explicitly disabled. "
+            "Mutually exclusive with --active-on-date."
+        ),
+    )
+    parser.add_argument(
+        "--new-range-start",
+        default=None,
+        help=(
+            "Optional YYYY-MM-DD lower bound for --new-on-date. When provided, "
+            "the new-installs filter matches first-seen dates in "
+            "[--new-range-start, --new-on-date] inclusive. Useful for showing a "
+            "7-day or 14-day window of new installs when single-day samples are "
+            "too small."
+        ),
+    )
+    parser.add_argument(
+        "--include-extended-facets",
+        action="store_true",
+        help=(
+            "When set, adds three additional facets (Registry Version, "
+            "Embeddings Backend, Cloud Detection Method) for a 9-panel chart. "
+            "Most useful for the new-installs view."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.active_on_date and args.new_on_date:
+        logger.error("--active-on-date and --new-on-date are mutually exclusive")
+        raise SystemExit(2)
 
     if not os.path.exists(args.csv):
         logger.error(f"CSV file not found: {args.csv}")
@@ -299,7 +442,35 @@ def main() -> None:
             logger.error(f"No instances active on {args.active_on_date}")
             raise SystemExit(1)
 
-    _generate_chart(rows, args.output, active_on_date=args.active_on_date)
+    include_extended = args.include_extended_facets or bool(args.new_on_date)
+
+    if args.new_range_start and not args.new_on_date:
+        logger.error("--new-range-start requires --new-on-date")
+        raise SystemExit(2)
+
+    if args.new_on_date:
+        rows = _filter_rows_new_on_date(
+            rows,
+            args.new_on_date,
+            range_start=args.new_range_start,
+        )
+        if not rows:
+            window = (
+                f"{args.new_range_start}..{args.new_on_date}"
+                if args.new_range_start
+                else args.new_on_date
+            )
+            logger.error(f"No new instances in {window}")
+            raise SystemExit(1)
+
+    _generate_chart(
+        rows,
+        args.output,
+        active_on_date=args.active_on_date,
+        new_on_date=args.new_on_date,
+        new_range_start=args.new_range_start,
+        include_extended_facets=include_extended,
+    )
 
 
 if __name__ == "__main__":
