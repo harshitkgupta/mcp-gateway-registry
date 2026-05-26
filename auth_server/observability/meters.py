@@ -85,8 +85,8 @@ auth_request_total = _meter.create_counter(
 )
 
 auth_request_duration_ms = _meter.create_histogram(
-    name="auth_request_duration_ms",
-    description="Authentication request duration in milliseconds",
+    name="auth_request_duration",
+    description="Authentication request duration",
     unit="ms",
 )
 
@@ -102,8 +102,8 @@ tool_execution_total = _meter.create_counter(
 )
 
 tool_execution_duration_ms = _meter.create_histogram(
-    name="tool_execution_duration_ms",
-    description="Tool execution duration in milliseconds",
+    name="tool_execution_duration",
+    description="Tool execution duration",
     unit="ms",
 )
 
@@ -113,7 +113,7 @@ tool_execution_duration_ms = _meter.create_histogram(
 # =============================================================================
 
 protocol_latency_ms = _meter.create_histogram(
-    name="protocol_latency_ms",
+    name="protocol_latency",
     description=(
         "Time between MCP protocol stages: initialize -> tools/list, "
         "tools/list -> tools/call, initialize -> tools/call"

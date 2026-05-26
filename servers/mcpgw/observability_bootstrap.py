@@ -49,8 +49,8 @@ def _get_tool_instruments() -> tuple[Any, Any] | tuple[None, None]:
         unit="1",
     )
     _tool_duration_histogram = meter.create_histogram(
-        name="mcpgw_tool_duration_ms",
-        description="FastMCP tool invocation duration in milliseconds",
+        name="mcpgw_tool_duration",
+        description="FastMCP tool invocation duration",
         unit="ms",
     )
     return _tool_invocations_counter, _tool_duration_histogram

@@ -143,7 +143,7 @@ registry_operation_total = _meter.create_counter(
 )
 
 registry_operation_duration_ms = _meter.create_histogram(
-    name="registry_operation_duration_ms",
+    name="registry_operation_duration",
     description="Registry API operation duration",
     unit="ms",
 )
@@ -155,7 +155,7 @@ tool_discovery_total = _meter.create_counter(
 )
 
 tool_discovery_duration_ms = _meter.create_histogram(
-    name="tool_discovery_duration_ms",
+    name="tool_discovery_duration",
     description="Semantic search duration",
     unit="ms",
 )
@@ -276,7 +276,7 @@ _peer_sync_failures_counter = _meter.create_counter(
 peer_sync_failures_total = _CounterAdapter(_peer_sync_failures_counter)
 
 _peer_sync_duration_histogram = _meter.create_histogram(
-    name="peer_sync_duration_seconds",
+    name="peer_sync_duration",
     description="Duration of peer sync operations",
     unit="s",
 )
