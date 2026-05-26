@@ -2368,16 +2368,26 @@ class TestMultiKeyStaticTokenValidate:
 
 
 # =============================================================================
-# MCP PROXY HEADER PASSTHROUGH TESTS
+# MCP PROXY RESPONSE-HEADER ALLOWLIST TESTS
 # =============================================================================
 #
 # The /mcp-proxy/{server_name} hop introduced in Issue #1026 buffers the
-# upstream MCP response and re-emits it via Starlette. Earlier revisions of
-# the handler built that Starlette response from body + status + content-type
-# only, silently dropping every other upstream response header -- including
-# Mcp-Session-Id, which streamable-http MCP servers emit during initialize
-# and which the client requires on follow-up requests. These tests pin the
-# helper and the three return-site branches so that regression cannot recur.
+# upstream MCP response and re-emits it via Starlette. Two regressions live
+# on the same code path:
+#
+#   1. Earlier revisions silently dropped every upstream response header,
+#      including Mcp-Session-Id which streamable-http MCP servers emit
+#      during initialize and which the client requires on follow-up
+#      requests. These tests pin the three return-site branches so that
+#      cannot recur.
+#
+#   2. The auth-server sits on a trust boundary in front of arbitrary
+#      upstream MCP servers. Forwarding every header (denylist) lets an
+#      upstream dictate Set-Cookie, Location, Strict-Transport-Security,
+#      Content-Security-Policy, Access-Control-Allow-*, Server, etc. The
+#      handler must instead use an allowlist (_FORWARDED_RESPONSE_HEADERS)
+#      that opts in the small set of MCP-essential headers only. These
+#      tests pin the allowlist and assert dangerous headers are dropped.
 
 
 def _build_mock_upstream_response(
@@ -2418,77 +2428,182 @@ def _patch_httpx_async_client(mock_upstream_response: MagicMock):
     return patch("auth_server.server.httpx.AsyncClient", return_value=mock_client)
 
 
-class TestPassthroughResponseHeaders:
-    """Tests for the _passthrough_response_headers helper that decides
-    which upstream headers are safe to forward back to the client.
+class TestForwardedResponseHeadersAllowlist:
+    """Tests for ``_select_forwarded_response_headers`` -- the function that
+    enforces the upstream-response-header allowlist.
+
+    Two responsibilities under test:
+      1. Allowlisted headers (Mcp-Session-Id, X-Mcp-Session-Id, WWW-
+         Authenticate, Retry-After) survive, case-insensitively.
+      2. Everything else, including framing headers and headers in the
+         review specifically called out as security-sensitive
+         (Set-Cookie, Location, HSTS, CSP, ACAO, Server), is dropped.
     """
 
-    def test_keeps_mcp_session_id(self):
-        """Mcp-Session-Id must survive the passthrough -- this is the
-        whole reason the helper exists.
+    def test_allowlist_membership_matches_constant(self):
+        """Pin the allowlist contents. Adding to the set is a
+        security-relevant change; this test forces the PR author to
+        update it intentionally and the reviewer to re-evaluate.
         """
-        from auth_server.server import _passthrough_response_headers
+        from auth_server.server import _FORWARDED_RESPONSE_HEADERS
+
+        assert _FORWARDED_RESPONSE_HEADERS == frozenset(
+            {
+                "mcp-session-id",
+                "x-mcp-session-id",
+                "www-authenticate",
+                "retry-after",
+            }
+        )
+
+    def test_keeps_mcp_session_id(self):
+        """Mcp-Session-Id is the original symptom of issue #1096 -- it
+        must survive the allowlist or streamable-http MCP clients lose
+        their session.
+        """
+        from auth_server.server import _select_forwarded_response_headers
 
         upstream = {
             "content-type": "application/json",
             "mcp-session-id": "sess-abc-123",
         }
 
-        forwarded = _passthrough_response_headers(upstream)
+        forwarded = _select_forwarded_response_headers(upstream)
 
-        assert forwarded["mcp-session-id"] == "sess-abc-123"
+        assert forwarded == {"mcp-session-id": "sess-abc-123"}
 
-    def test_strips_framing_headers(self):
-        """Framing/encoding headers (content-length, content-encoding,
-        transfer-encoding, connection) must be stripped so Starlette can
-        recompute them for the body it actually serializes.
+    def test_keeps_x_mcp_session_id_legacy_alias(self):
+        """Some MCP servers emit the legacy X-Mcp-Session-Id alias; the
+        allowlist must include it for the same session-management reason.
         """
-        from auth_server.server import _passthrough_response_headers
+        from auth_server.server import _select_forwarded_response_headers
+
+        upstream = {"x-mcp-session-id": "sess-legacy-007"}
+
+        assert _select_forwarded_response_headers(upstream) == {
+            "x-mcp-session-id": "sess-legacy-007",
+        }
+
+    def test_keeps_www_authenticate_for_prm_flow(self):
+        """PR #1115 introduced the OAuth PRM / resource-metadata 401
+        flow that depends on WWW-Authenticate reaching the MCP client.
+        """
+        from auth_server.server import _select_forwarded_response_headers
 
         upstream = {
-            "content-type": "application/json",
+            "www-authenticate": 'Bearer resource_metadata="https://idp.example/.well-known/oauth-protected-resource"'
+        }
+
+        assert _select_forwarded_response_headers(upstream) == upstream
+
+    def test_keeps_retry_after_for_backoff(self):
+        """Retry-After must be forwarded so MCP clients honor upstream
+        429/503 backoff instead of retry-storming the upstream.
+        """
+        from auth_server.server import _select_forwarded_response_headers
+
+        upstream = {"retry-after": "30"}
+
+        assert _select_forwarded_response_headers(upstream) == {"retry-after": "30"}
+
+    def test_match_is_case_insensitive_for_allowlist(self):
+        """HTTP header names are case-insensitive (RFC 9110 §5.1). The
+        upstream may emit any casing; the allowlist match must work
+        regardless, and the helper must preserve the wire casing on
+        return so the client sees what the MCP server actually sent.
+        """
+        from auth_server.server import _select_forwarded_response_headers
+
+        upstream = {
+            "Mcp-Session-Id": "sess-xyz",
+            "WWW-Authenticate": "Bearer realm=mcp",
+            "Retry-After": "5",
+        }
+
+        forwarded = _select_forwarded_response_headers(upstream)
+
+        assert forwarded["Mcp-Session-Id"] == "sess-xyz"
+        assert forwarded["WWW-Authenticate"] == "Bearer realm=mcp"
+        assert forwarded["Retry-After"] == "5"
+
+    def test_drops_set_cookie_and_location_regression(self):
+        """Regression for review feedback on PR #1097: an upstream MCP
+        server must not be able to set cookies or redirect targets on
+        the gateway response. These are the headers the reviewer
+        specifically called out -- they are the canonical "trust
+        boundary leak" pair and the most likely abuse vector.
+        """
+        from auth_server.server import _select_forwarded_response_headers
+
+        upstream = {
+            "Set-Cookie": "session=evil; Path=/; HttpOnly",
+            "Location": "https://attacker.example/oauth/authorize",
+            "Mcp-Session-Id": "sess-keep-me",
+        }
+
+        forwarded = _select_forwarded_response_headers(upstream)
+
+        assert "Set-Cookie" not in forwarded
+        assert "Location" not in forwarded
+        # And the allowlisted header is still there so the test is not
+        # vacuously asserting an empty dict.
+        assert forwarded["Mcp-Session-Id"] == "sess-keep-me"
+
+    def test_drops_security_policy_headers(self):
+        """Other reviewer-cited headers -- HSTS, CSP, ACAO, Server -- let
+        an upstream override the gateway's security posture. Drop them.
+        """
+        from auth_server.server import _select_forwarded_response_headers
+
+        upstream = {
+            "Strict-Transport-Security": "max-age=0",
+            "Content-Security-Policy": "default-src *",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Credentials": "true",
+            "Server": "evil-upstream/1.0",
+        }
+
+        assert _select_forwarded_response_headers(upstream) == {}
+
+    def test_drops_framing_headers(self):
+        """Framing / encoding headers describe the upstream wire
+        message; Starlette must recompute them for the body it actually
+        serializes (which may be httpx-decoded when the upstream used
+        Content-Encoding: gzip). They are not on the allowlist, so the
+        allowlist drops them for free.
+        """
+        from auth_server.server import _select_forwarded_response_headers
+
+        upstream = {
             "content-length": "1024",
             "content-encoding": "gzip",
             "transfer-encoding": "chunked",
             "connection": "keep-alive",
-            "x-custom-header": "keep-me",
         }
 
-        forwarded = _passthrough_response_headers(upstream)
+        assert _select_forwarded_response_headers(upstream) == {}
 
-        assert "content-length" not in forwarded
-        assert "content-encoding" not in forwarded
-        assert "transfer-encoding" not in forwarded
-        assert "connection" not in forwarded
-        assert forwarded["x-custom-header"] == "keep-me"
-        assert forwarded["content-type"] == "application/json"
-
-    def test_strip_match_is_case_insensitive(self):
-        """HTTP header names are case-insensitive; httpx may emit any
-        casing. The strip set must match regardless of the upstream
-        casing or this becomes a silent regression.
+    def test_drops_arbitrary_x_headers(self):
+        """The reviewer wants opt-in, not opt-out. Custom X-* headers
+        from the upstream must not survive even if they look innocuous.
         """
-        from auth_server.server import _passthrough_response_headers
+        from auth_server.server import _select_forwarded_response_headers
 
         upstream = {
-            "Content-Length": "42",
-            "CONTENT-ENCODING": "gzip",
-            "Mcp-Session-Id": "sess-xyz",
+            "X-Frame-Options": "DENY",
+            "X-Custom-Tracking": "abc123",
+            "X-Powered-By": "MCP/0.1",
         }
 
-        forwarded = _passthrough_response_headers(upstream)
-
-        assert "Content-Length" not in forwarded
-        assert "CONTENT-ENCODING" not in forwarded
-        assert forwarded["Mcp-Session-Id"] == "sess-xyz"
+        assert _select_forwarded_response_headers(upstream) == {}
 
     def test_empty_input_returns_empty(self):
         """Defensive: an empty upstream-header dict must produce an
         empty forwarded dict, never a None or an error.
         """
-        from auth_server.server import _passthrough_response_headers
+        from auth_server.server import _select_forwarded_response_headers
 
-        assert _passthrough_response_headers({}) == {}
+        assert _select_forwarded_response_headers({}) == {}
 
 
 class TestMcpProxyEndpointHeaderPassthrough:
@@ -2643,3 +2758,77 @@ class TestMcpProxyEndpointHeaderPassthrough:
 
         assert response.status_code == 400
         assert "X-Upstream-Url" in response.json()["detail"]
+
+    def test_set_cookie_and_location_dropped_end_to_end(self):
+        """End-to-end regression: even if an upstream MCP server emits
+        Set-Cookie and Location, the Starlette response the gateway
+        sends back to the client must not carry them. This is the
+        regression test the reviewer explicitly asked for on the
+        allowlist conversion.
+        """
+        import auth_server.server as server_module
+
+        upstream_resp = _build_mock_upstream_response(
+            status_code=200,
+            headers={
+                "content-type": "application/json",
+                "mcp-session-id": "sess-allowlist-100",
+                "set-cookie": "session=evil; Path=/; HttpOnly",
+                "location": "https://attacker.example/oauth/authorize",
+                "strict-transport-security": "max-age=0",
+                "access-control-allow-origin": "*",
+            },
+            body=b'{"jsonrpc":"2.0","id":1,"result":{}}',
+        )
+
+        with (
+            _patch_httpx_async_client(upstream_resp),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/office-docs",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                headers={"X-Upstream-Url": "https://upstream.example/mcp"},
+            )
+
+        assert response.status_code == 200
+        # Allowlisted header survives.
+        assert response.headers.get("mcp-session-id") == "sess-allowlist-100"
+        # The reviewer-cited headers must not reach the client.
+        assert "set-cookie" not in {k.lower() for k in response.headers.keys()}
+        assert response.headers.get("location") is None
+        assert response.headers.get("strict-transport-security") is None
+        assert response.headers.get("access-control-allow-origin") is None
+
+    def test_www_authenticate_and_retry_after_forwarded(self):
+        """The PRM/OAuth flow (PR #1115) needs WWW-Authenticate on 401s,
+        and rate-limit-aware MCP clients honor Retry-After. Both must
+        round-trip through the gateway.
+        """
+        import auth_server.server as server_module
+
+        upstream_resp = _build_mock_upstream_response(
+            status_code=401,
+            headers={
+                "content-type": "application/json",
+                "www-authenticate": 'Bearer resource_metadata="https://idp.example/.well-known/oauth-protected-resource"',
+                "retry-after": "15",
+            },
+            body=b'{"error":"unauthorized"}',
+        )
+
+        with (
+            _patch_httpx_async_client(upstream_resp),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/office-docs",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                headers={"X-Upstream-Url": "https://upstream.example/mcp"},
+            )
+
+        assert response.status_code == 401
+        assert response.headers.get("www-authenticate", "").startswith("Bearer")
+        assert response.headers.get("retry-after") == "15"

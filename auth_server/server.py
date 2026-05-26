@@ -16,6 +16,7 @@ import secrets
 import sys
 import time
 import urllib.parse
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -3773,17 +3774,39 @@ _HOP_BY_HOP_HEADERS: frozenset[str] = frozenset(
 )
 
 
-# Headers we must NOT copy from the upstream MCP response onto the Starlette
-# response sent back to the client. They describe the wire-level framing of
-# the upstream HTTP message; Starlette computes the correct values for the
-# body it actually serializes (which may be httpx-decoded when the upstream
-# used Content-Encoding: gzip).
-_RESPONSE_FRAMING_HEADERS: frozenset[str] = frozenset(
+# Allowlist of upstream response headers the proxy is permitted to forward
+# back to the MCP client. The auth-server sits on a trust boundary in front
+# of arbitrary upstream MCP servers, so the default posture is to drop
+# everything and explicitly opt-in the small set of headers MCP clients
+# actually act on. This prevents an upstream from dictating response-header
+# policy that browsers / MCP clients honor (Set-Cookie, Strict-Transport-
+# Security, Content-Security-Policy, Access-Control-Allow-*, Location,
+# Server, etc.) and from overriding framing headers Starlette must set
+# itself (Content-Length, Content-Encoding, Transfer-Encoding, Connection).
+#
+# Entries are stored lowercase; matching is case-insensitive (HTTP header
+# names are case-insensitive per RFC 9110 section 5.1). Adding to this set
+# is a security-relevant change -- every new entry should be reviewed for
+# whether an upstream-supplied value could be abused before it lands.
+#
+# Why each entry is here:
+#   mcp-session-id     streamable-http MCP servers emit this on initialize
+#                      and clients must echo it on follow-up requests to
+#                      identify the session (MCP spec, "Session
+#                      management").
+#   x-mcp-session-id   legacy alias some MCP servers / clients still emit;
+#                      kept for compatibility with the same flow.
+#   www-authenticate   required by the PRM / OAuth resource-metadata flow
+#                      added in PR #1115 so 401 responses point clients at
+#                      the authorization server.
+#   retry-after        lets clients honor upstream 429 / 503 backoff hints
+#                      rather than retry-storm the upstream.
+_FORWARDED_RESPONSE_HEADERS: frozenset[str] = frozenset(
     {
-        "content-length",
-        "content-encoding",
-        "transfer-encoding",
-        "connection",
+        "mcp-session-id",
+        "x-mcp-session-id",
+        "www-authenticate",
+        "retry-after",
     }
 )
 
@@ -3829,21 +3852,29 @@ def _forward_headers(
     return forwarded
 
 
-def _passthrough_response_headers(
-    upstream_headers: dict[str, str],
+def _select_forwarded_response_headers(
+    upstream_headers: Mapping[str, str],
 ) -> dict[str, str]:
-    """Copy upstream MCP response headers for return to the client,
-    stripping framing/encoding headers that Starlette must set itself.
+    """Select upstream MCP response headers safe to forward back to the
+    client, applying the ``_FORWARDED_RESPONSE_HEADERS`` allowlist with
+    case-insensitive matching.
 
-    Preserves all other headers, including ``Mcp-Session-Id`` which
-    streamable-http MCP servers emit during ``initialize`` and which the
-    client requires on follow-up requests to identify the session.
+    Anything outside the allowlist is silently dropped. This is the
+    enforcement point for the trust boundary between the auth-server and
+    arbitrary upstream MCP servers -- an upstream cannot dictate
+    ``Set-Cookie``, ``Location``, ``Strict-Transport-Security`` etc. on
+    responses the gateway issues.
+
+    The original header casing from the upstream is preserved on the
+    returned dict so the bytes on the wire match what the MCP server sent
+    (e.g. ``Mcp-Session-Id`` rather than ``mcp-session-id``). HTTP header
+    lookups remain case-insensitive on Starlette's ``Response.headers``.
     """
-    return {
-        key: value
-        for key, value in upstream_headers.items()
-        if key.lower() not in _RESPONSE_FRAMING_HEADERS
-    }
+    selected: dict[str, str] = {}
+    for key, value in upstream_headers.items():
+        if key.lower() in _FORWARDED_RESPONSE_HEADERS:
+            selected[key] = value
+    return selected
 
 
 @app.post("/mcp-proxy/{server_name:path}")
@@ -3956,13 +3987,13 @@ async def mcp_proxy(
         and "application/json" in content_type.lower()
     )
 
-    # Forward key MCP response headers from the upstream (especially
-    # Mcp-Session-Id which the client needs for subsequent requests).
-    response_headers: dict[str, str] = {}
-    for hdr in ("mcp-session-id", "x-mcp-session-id"):
-        val = upstream_headers.get(hdr)
-        if val:
-            response_headers[hdr] = val
+    # Apply the response-header allowlist. Anything outside
+    # _FORWARDED_RESPONSE_HEADERS (Set-Cookie, Location, HSTS, CSP,
+    # framing headers, etc.) is dropped here so an upstream MCP server
+    # cannot dictate response-header policy on the gateway. The
+    # allowlist itself is the auditable enforcement point -- adding to
+    # it requires a security review (see comment on the constant).
+    response_headers = _select_forwarded_response_headers(upstream_headers)
 
     if not should_filter:
         # Forward the upstream body and content_type unchanged. Many MCP
