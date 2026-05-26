@@ -66,6 +66,52 @@ locals {
       }
     }
   }) : ""
+
+  # ADOT collector configuration for OTLP-receive + AMP-remote-write
+  # (Issue #1122). One sidecar per main service task (registry, auth-server,
+  # mcpgw): each main container OTLP-pushes to localhost:4317; the sidecar
+  # remote-writes to AMP. This replaces the legacy metrics-service pull
+  # pattern with a per-task push pattern that surfaces in-process counters
+  # to AMP for the first time.
+  adot_otlp_to_amp_config = var.enable_observability ? yamlencode({
+    receivers = {
+      otlp = {
+        protocols = {
+          grpc = {
+            endpoint = "0.0.0.0:4317"
+          }
+          http = {
+            endpoint = "0.0.0.0:4318"
+          }
+        }
+      }
+    }
+    exporters = {
+      prometheusremotewrite = {
+        endpoint = local.amp_remote_write_endpoint
+        auth = {
+          authenticator = "sigv4auth"
+        }
+      }
+    }
+    extensions = {
+      sigv4auth = {
+        region = data.aws_region.current.id
+      }
+      health_check = {
+        endpoint = "0.0.0.0:13133"
+      }
+    }
+    service = {
+      extensions = ["sigv4auth", "health_check"]
+      pipelines = {
+        metrics = {
+          receivers = ["otlp"]
+          exporters = ["prometheusremotewrite"]
+        }
+      }
+    }
+  }) : ""
 }
 
 

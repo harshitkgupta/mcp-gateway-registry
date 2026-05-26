@@ -53,10 +53,16 @@ module "ecs_service_auth" {
     EcsExecTaskExecution = aws_iam_policy.ecs_exec_task_execution.arn
   }
   create_tasks_iam_role = true
-  tasks_iam_role_policies = {
-    SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
-    EcsExecTask          = aws_iam_policy.ecs_exec_task.arn
-  }
+  tasks_iam_role_policies = merge(
+    {
+      SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
+      EcsExecTask          = aws_iam_policy.ecs_exec_task.arn
+    },
+    # Issue #1122: per-task ADOT sidecar needs AMP remote-write permission
+    var.enable_observability ? {
+      AMPRemoteWrite = aws_iam_policy.adot_amp_write[0].arn
+    } : {}
+  )
 
   # Enable Service Connect
   service_connect_configuration = {
@@ -72,7 +78,7 @@ module "ecs_service_auth" {
   }
 
   # Container definitions
-  container_definitions = {
+  container_definitions = merge({
     auth-server = {
       cpu                    = tonumber(var.cpu)
       memory                 = tonumber(var.memory)
@@ -366,6 +372,27 @@ module "ecs_service_auth" {
         {
           name  = "METRICS_SERVICE_URL"
           value = var.enable_observability ? "http://metrics-service:8890" : ""
+        },
+        # OTel-native metrics emission (Issue #1122). The legacy flag is
+        # off by default; metrics flow only via the OTel SDK push to the
+        # per-task ADOT sidecar at localhost:4317.
+        {
+          name  = "METRICS_LEGACY_HTTP_POST"
+          value = "false"
+        },
+        {
+          name  = "OTEL_METRIC_EXPORT_INTERVAL_MS"
+          value = "15000"
+        },
+        # OTel SDK OTLP push target. Pointed at the same-task ADOT sidecar
+        # only when observability is enabled, otherwise empty (SDK no-ops).
+        {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = var.enable_observability ? "http://localhost:4317" : ""
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_PROTOCOL"
+          value = "grpc"
         }
         ],
         # PR #947: MongoDB connection string override (plain-text variant).
@@ -476,7 +503,44 @@ module "ecs_service_auth" {
         startPeriod = 60
       }
     }
-  }
+    },
+    # Issue #1122: per-task ADOT collector sidecar.
+    # Receives OTLP metrics from the auth-server container on
+    # localhost:4317 and remote-writes them to AMP.
+    # Only created when observability is enabled.
+    var.enable_observability ? {
+      adot-collector = {
+        cpu                    = 128
+        memory                 = 256
+        essential              = false
+        image                  = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+        versionConsistency     = "disabled"
+        readonlyRootFilesystem = false
+
+        command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+        environment = [
+          {
+            name  = "AOT_CONFIG_CONTENT"
+            value = local.adot_otlp_to_amp_config
+          },
+          {
+            name  = "AWS_REGION"
+            value = data.aws_region.current.id
+          }
+        ]
+
+        enable_cloudwatch_logging              = true
+        cloudwatch_log_group_name              = "/ecs/${local.name_prefix}-auth-server-adot"
+        cloudwatch_log_group_retention_in_days = 30
+
+        dependencies = [{
+          containerName = "auth-server"
+          condition     = "START"
+        }]
+      }
+    } : {}
+  )
 
   volume = {
     mcp-logs = {
@@ -529,15 +593,15 @@ module "ecs_service_registry" {
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
-  name                               = "${local.name_prefix}-registry"
-  cluster_arn                        = var.ecs_cluster_arn
-  cpu                                = tonumber(var.cpu)
-  memory                             = tonumber(var.memory)
-  desired_count                      = var.enable_autoscaling ? var.autoscaling_min_capacity : var.registry_replicas
-  health_check_grace_period_seconds  = 900
-  enable_autoscaling       = var.enable_autoscaling
-  autoscaling_min_capacity = var.autoscaling_min_capacity
-  autoscaling_max_capacity = var.autoscaling_max_capacity
+  name                              = "${local.name_prefix}-registry"
+  cluster_arn                       = var.ecs_cluster_arn
+  cpu                               = tonumber(var.cpu)
+  memory                            = tonumber(var.memory)
+  desired_count                     = var.enable_autoscaling ? var.autoscaling_min_capacity : var.registry_replicas
+  health_check_grace_period_seconds = 900
+  enable_autoscaling                = var.enable_autoscaling
+  autoscaling_min_capacity          = var.autoscaling_min_capacity
+  autoscaling_max_capacity          = var.autoscaling_max_capacity
   autoscaling_policies = var.enable_autoscaling ? {
     cpu = {
       policy_type = "TargetTrackingScaling"
@@ -584,6 +648,10 @@ module "ecs_service_registry" {
     },
     var.aws_registry_federation_enabled ? {
       BedrockAgentCoreAccess = aws_iam_policy.bedrock_agentcore_access[0].arn
+    } : {},
+    # Issue #1122: per-task ADOT sidecar needs AMP remote-write permission
+    var.enable_observability ? {
+      AMPRemoteWrite = aws_iam_policy.adot_amp_write[0].arn
     } : {}
   )
 
@@ -601,7 +669,7 @@ module "ecs_service_registry" {
   }
 
   # Container definitions
-  container_definitions = {
+  container_definitions = merge({
     registry = {
       cpu                    = tonumber(var.cpu)
       memory                 = tonumber(var.memory)
@@ -1094,6 +1162,23 @@ module "ecs_service_registry" {
           name  = "METRICS_SERVICE_URL"
           value = var.enable_observability ? "http://metrics-service:8890" : ""
         },
+        # OTel-native metrics emission (Issue #1122)
+        {
+          name  = "METRICS_LEGACY_HTTP_POST"
+          value = "false"
+        },
+        {
+          name  = "OTEL_METRIC_EXPORT_INTERVAL_MS"
+          value = "15000"
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = var.enable_observability ? "http://localhost:4317" : ""
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_PROTOCOL"
+          value = "grpc"
+        },
         # Service Connect namespace for FQDN alias injection in entrypoint.
         # Enables Python health checker to resolve both short names and FQDNs.
         {
@@ -1235,7 +1320,41 @@ module "ecs_service_registry" {
         startPeriod = 60
       }
     }
-  }
+    },
+    # Issue #1122: per-task ADOT collector sidecar for the registry service.
+    var.enable_observability ? {
+      adot-collector = {
+        cpu                    = 128
+        memory                 = 256
+        essential              = false
+        image                  = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+        versionConsistency     = "disabled"
+        readonlyRootFilesystem = false
+
+        command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+        environment = [
+          {
+            name  = "AOT_CONFIG_CONTENT"
+            value = local.adot_otlp_to_amp_config
+          },
+          {
+            name  = "AWS_REGION"
+            value = data.aws_region.current.id
+          }
+        ]
+
+        enable_cloudwatch_logging              = true
+        cloudwatch_log_group_name              = "/ecs/${local.name_prefix}-registry-adot"
+        cloudwatch_log_group_retention_in_days = 30
+
+        dependencies = [{
+          containerName = "registry"
+          condition     = "START"
+        }]
+      }
+    } : {}
+  )
 
   # EFS volumes removed - registry uses ephemeral storage and DocumentDB for persistence
   volume = {}
@@ -1506,10 +1625,16 @@ module "ecs_service_mcpgw" {
     EcsExecTaskExecution = aws_iam_policy.ecs_exec_task_execution.arn
   }
   create_tasks_iam_role = true
-  tasks_iam_role_policies = {
-    SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
-    EcsExecTask          = aws_iam_policy.ecs_exec_task.arn
-  }
+  tasks_iam_role_policies = merge(
+    {
+      SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
+      EcsExecTask          = aws_iam_policy.ecs_exec_task.arn
+    },
+    # Issue #1122: per-task ADOT sidecar needs AMP remote-write permission
+    var.enable_observability ? {
+      AMPRemoteWrite = aws_iam_policy.adot_amp_write[0].arn
+    } : {}
+  )
 
   service_connect_configuration = {
     namespace = aws_service_discovery_private_dns_namespace.mcp.arn
@@ -1523,7 +1648,7 @@ module "ecs_service_mcpgw" {
     }]
   }
 
-  container_definitions = {
+  container_definitions = merge({
     mcpgw-server = {
       cpu                    = 512
       memory                 = 1024
@@ -1576,6 +1701,23 @@ module "ecs_service_mcpgw" {
         {
           name  = "APP_LOG_LEVEL"
           value = var.app_log_level
+        },
+        # OTel-native metrics emission (Issue #1122)
+        {
+          name  = "METRICS_LEGACY_HTTP_POST"
+          value = "false"
+        },
+        {
+          name  = "OTEL_METRIC_EXPORT_INTERVAL_MS"
+          value = "15000"
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = var.enable_observability ? "http://localhost:4317" : ""
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_PROTOCOL"
+          value = "grpc"
         }
         ],
         # Extra environment variables from user (Issue #1000)
@@ -1609,7 +1751,41 @@ module "ecs_service_mcpgw" {
         startPeriod = 30
       }
     }
-  }
+    },
+    # Issue #1122: per-task ADOT collector sidecar for the mcpgw service.
+    var.enable_observability ? {
+      adot-collector = {
+        cpu                    = 128
+        memory                 = 256
+        essential              = false
+        image                  = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+        versionConsistency     = "disabled"
+        readonlyRootFilesystem = false
+
+        command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+        environment = [
+          {
+            name  = "AOT_CONFIG_CONTENT"
+            value = local.adot_otlp_to_amp_config
+          },
+          {
+            name  = "AWS_REGION"
+            value = data.aws_region.current.id
+          }
+        ]
+
+        enable_cloudwatch_logging              = true
+        cloudwatch_log_group_name              = "/ecs/${local.name_prefix}-mcpgw-adot"
+        cloudwatch_log_group_retention_in_days = 30
+
+        dependencies = [{
+          containerName = "mcpgw-server"
+          condition     = "START"
+        }]
+      }
+    } : {}
+  )
 
   volume = {
     mcpgw-data = {
