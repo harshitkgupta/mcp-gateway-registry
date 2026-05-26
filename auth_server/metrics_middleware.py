@@ -24,14 +24,27 @@ import httpx
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from auth_server.observability.meters import (
-    auth_request_duration_ms,
-    auth_request_total,
-    protocol_latency_ms,
-    record_emission_path,
-    tool_execution_duration_ms,
-    tool_execution_total,
-)
+# Dual-path import: in-container the auth_server package is flattened into
+# /app (so siblings are imported without the ``auth_server.`` prefix); under
+# pytest the package is rooted at the repo so the prefix is required.
+try:
+    from observability.meters import (
+        auth_request_duration_ms,
+        auth_request_total,
+        protocol_latency_ms,
+        record_emission_path,
+        tool_execution_duration_ms,
+        tool_execution_total,
+    )
+except ImportError:
+    from auth_server.observability.meters import (
+        auth_request_duration_ms,
+        auth_request_total,
+        protocol_latency_ms,
+        record_emission_path,
+        tool_execution_duration_ms,
+        tool_execution_total,
+    )
 
 logger = logging.getLogger(__name__)
 
