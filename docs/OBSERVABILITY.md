@@ -136,6 +136,144 @@ Without this set, OTel traces are tagged `unknown_service` in your tracing
 backend, making it impossible to tell which container produced which span.
 Set it explicitly when adding a new service.
 
+## Where to view metrics
+
+Each deployment surface has a different "I want to look at the metrics" UX,
+because each has a different observability stack. The metrics themselves
+are the same — only the viewer changes.
+
+### Docker Compose
+
+Everything is wired in the `docker-compose.yml` file: Prometheus container,
+Grafana container, and (optional) the OTel collector for OTLP push
+verification. Direct access from your laptop:
+
+| URL | What you see |
+|---|---|
+| `http://localhost:9090/targets` | Prometheus targets page. All four `mcp-*` jobs (registry, auth-server, mcpgw, metrics-service for the legacy path) should show **UP**. |
+| `http://localhost:9090/graph` | Prometheus query workbench. Type any of the queries from [Query cookbook](#query-cookbook) here. |
+| `http://localhost:3000/` | Grafana UI. Login admin / `${GRAFANA_ADMIN_PASSWORD}` from `.env`. Add a Prometheus data source pointing at `http://prometheus:9090`. |
+| `http://localhost:8889/metrics` | The OTel collector's re-exposed Prometheus surface (only meaningful when `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317` is set in `.env`). |
+
+For a graphical trace browser, follow the instructions in
+[Adding a graphical trace UI](#adding-a-graphical-trace-ui).
+
+To inspect raw metrics from any container without going through Prometheus:
+
+```bash
+docker compose exec prometheus wget -qO- http://registry:9464/metrics | head -30
+docker compose exec prometheus wget -qO- http://auth-server:9464/metrics | head -30
+docker compose exec prometheus wget -qO- http://mcpgw-server:9464/metrics | head -30
+```
+
+### AWS ECS (Terraform)
+
+The Terraform module at `terraform/aws-ecs/` provisions a complete
+observability stack when `var.enable_observability=true`:
+
+- **Amazon Managed Prometheus (AMP) workspace** receives metrics via
+  per-task ADOT sidecars (see Phase E of #1122).
+- **Grafana ECS service** runs as a containerized Grafana, connected to AMP
+  via the `grafana_amp_query` IAM policy. Routed by the ALB on path
+  `/grafana/*`.
+- **AMP query endpoint** exposed as the Terraform output `amp_endpoint`.
+
+Direct access:
+
+| Where | What you see |
+|---|---|
+| `https://<your-domain>/grafana/` | Grafana UI. Login is admin / `${GRAFANA_ADMIN_PASSWORD}` set in `terraform.tfvars`. The Prometheus data source is pre-wired to AMP via SigV4 auth. |
+| AWS Console → Amazon Managed Service for Prometheus | AMP workspace with all metrics. Use the AMP-native query UI or any vendor that speaks the AMP query API. |
+| `terraform output amp_endpoint` | The query endpoint URL, useful for `aws-prom-query` CLI calls or custom dashboards. |
+
+Quick AMP query from the CLI:
+
+```bash
+AMP_ENDPOINT=$(terraform -chdir=terraform/aws-ecs output -raw amp_endpoint)
+awscurl --service aps --region <region> "${AMP_ENDPOINT}api/v1/query?query=auth_request_total"
+```
+
+To verify metrics are flowing into AMP after a deploy:
+
+```bash
+# In CloudWatch Logs, look at the ADOT sidecar log group for any service
+aws logs tail /ecs/mcp-gateway-registry-adot --follow --since 5m
+# Should see "metrics" entries. No errors mentioning "remote_write" or "sigv4".
+```
+
+### Kubernetes / EKS (Helm)
+
+The Helm chart **does NOT ship Prometheus or Grafana**. EKS operators bring
+their own observability stack — typically `kube-prometheus-stack` (which
+gives you Prometheus + Grafana + Alertmanager) or a vendor
+(Datadog, New Relic, Honeycomb, Grafana Cloud).
+
+What the chart DOES provide:
+
+- The OTel SDK Prometheus exporter listens on `:9464` inside each pod
+  (registry, auth-server, mcpgw).
+- A `NetworkPolicy` template that gates ingress to `:9464` to allow only
+  pods matching `metricsScrape.networkPolicy.fromPodSelector` (default:
+  `app.kubernetes.io/name: prometheus` in the `monitoring` namespace).
+
+Operators wire one of two paths:
+
+**Path 1: in-cluster Prometheus pulls from `:9464`.** If you're running
+`kube-prometheus-stack`, add a `ServiceMonitor` resource:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mcp-gateway-services
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames: [<your-mcp-gateway-namespace>]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: registry  # repeat for auth-server, mcpgw
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 10s
+```
+
+Make sure `metricsScrape.networkPolicy.fromPodSelector` in the Helm values
+matches your in-cluster Prometheus pod labels.
+
+**Path 2: OTLP push to your collector or vendor.** Set `OTEL_EXPORTER_OTLP_ENDPOINT`
+via the chart's `extraEnv` block to point at your in-cluster collector
+(typically an OTel collector deployed via the `opentelemetry-operator` or
+the `kube-prometheus-stack`'s OTLP receiver) or directly at a vendor's
+OTLP endpoint:
+
+```yaml
+# In your values.yaml override
+extraEnv:
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "http://otel-collector.monitoring:4317"
+  - name: OTEL_EXPORTER_OTLP_PROTOCOL
+    value: "grpc"
+  # For vendor backends with auth headers:
+  - name: OTEL_EXPORTER_OTLP_HEADERS
+    valueFrom:
+      secretKeyRef:
+        name: my-otlp-secret
+        key: headers
+```
+
+After either path, query metrics through whatever UI your stack exposes
+(Grafana via kube-prometheus-stack's ingress, the vendor's web UI, etc.).
+
+### Quick triage cheat sheet
+
+| Question | Compose | ECS | EKS |
+|---|---|---|---|
+| Is the metric being emitted at all? | `docker compose exec prometheus wget -qO- http://<service>:9464/metrics` | CloudWatch Logs on the ADOT sidecar | `kubectl exec` into a pod and `curl localhost:9464/metrics` |
+| Is the scrape working? | `http://localhost:9090/targets` | AMP query for the metric returns rows | `kubectl get servicemonitor -A` and Prometheus `/targets` |
+| Where do I look at the data? | `http://localhost:9090/graph` or `:3000` Grafana | `https://<domain>/grafana/` | Your in-cluster Grafana / vendor UI |
+
 ## Metric inventory
 
 The full list of metrics emitted as of 1.25.0. **Names below are the Prometheus
