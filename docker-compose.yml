@@ -599,6 +599,24 @@ services:
       timeout: 10s
       retries: 3
 
+  # OpenTelemetry Collector (Issue #1122)
+  # Receives OTLP from registry/auth-server/mcpgw on :4317, re-exports as
+  # Prometheus on :8889, and logs everything via the debug exporter.
+  # Used for local verification; the OTLP push pipeline is also exercised
+  # on ECS via per-task ADOT sidecars and on EKS via the operator's own
+  # collector.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./config/otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC (services push here)
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus exporter on the collector itself
+      - "13133:13133" # health_check extension
+    restart: unless-stopped
+
   # Prometheus for metrics collection
   prometheus:
     image: prom/prometheus:latest

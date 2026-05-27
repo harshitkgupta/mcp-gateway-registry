@@ -35,6 +35,21 @@ scrape_configs:
     metrics_path: /metrics
 
   # ---------------------------------------------------------------------------
+  # OpenTelemetry Collector (Issue #1122)
+  # ---------------------------------------------------------------------------
+  # The collector re-exposes everything it receives over OTLP in Prometheus
+  # format on :8889. Useful as a second view of the same metrics, and shows
+  # the collector's own otelcol_* self-metrics. The collector is only
+  # meaningful when at least one service has OTEL_EXPORTER_OTLP_ENDPOINT
+  # pointing at it; otherwise this scrape job returns only collector
+  # self-metrics.
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8889']
+    scrape_interval: 10s
+    metrics_path: /metrics
+
+  # ---------------------------------------------------------------------------
   # Legacy metrics-service scrape (deprecated; removed in 1.26.0)
   # ---------------------------------------------------------------------------
   # Only meaningful when METRICS_LEGACY_HTTP_POST=true is set in .env, in which
