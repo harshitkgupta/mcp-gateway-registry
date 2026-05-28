@@ -371,7 +371,11 @@ fi
 echo "Starting Nginx..."
 # Create /run/nginx directory for pid file (tmpfs mount overwrites Dockerfile creation)
 mkdir -p /run/nginx
-# Change pid file location to writable directory for non-root user
+# Change pid file location to writable directory for non-root user. The same
+# rewrite is also done at image-build time (see Dockerfile.registry) so that
+# the pid directive is correct before uvicorn starts and registers any servers
+# that trigger nginx -t. The sed below is idempotent and harmless if already
+# applied at build time.
 sed -i 's|pid /run/nginx.pid;|pid /run/nginx/nginx.pid;|' /etc/nginx/nginx.conf
 nginx
 
