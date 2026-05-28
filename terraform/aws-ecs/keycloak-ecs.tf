@@ -18,31 +18,33 @@ locals {
       value = var.aws_region
     },
     {
-      name  = "KC_PROXY"
-      value = "edge"
+      # Issue #1122: KC_PROXY=edge was deprecated in Keycloak 24+; KC25 ignores
+      # it. Replaced with KC_PROXY_HEADERS=xforwarded so Keycloak trusts the
+      # X-Forwarded-Proto/Host headers from CloudFront → ALB and recognizes
+      # the connection as HTTPS. Without this, KC25 returns "HTTPS required"
+      # for all OIDC endpoints.
+      name  = "KC_PROXY_HEADERS"
+      value = "xforwarded"
     },
     {
-      name  = "KC_PROXY_ADDRESS_FORWARDING"
-      value = "true"
-    },
-    {
-      # KC_HOSTNAME_URL tells Keycloak the full external URL including protocol
-      # This is required for CloudFront mode where Keycloak needs to know it's behind HTTPS
-      name  = "KC_HOSTNAME_URL"
+      # Issue #1122: Keycloak 25 introduced "Hostname v2" config. The KC23
+      # variables KC_HOSTNAME_URL, KC_HOSTNAME_ADMIN_URL, KC_HOSTNAME_STRICT,
+      # and KC_HOSTNAME_STRICT_HTTPS are all deprecated and IGNORED on KC25.
+      # Replaced with a single KC_HOSTNAME pointing at the full public URL.
+      # When KC_HOSTNAME is a full https:// URL, KC25 derives the canonical
+      # scheme from it and trusts X-Forwarded-Proto via KC_PROXY_HEADERS.
+      # See https://www.keycloak.org/server/hostname for hostname v2 docs.
+      name  = "KC_HOSTNAME"
       value = local.keycloak_hostname_url
     },
     {
-      # KC_HOSTNAME_ADMIN_URL for admin console access
-      name  = "KC_HOSTNAME_ADMIN_URL"
-      value = local.keycloak_hostname_url
-    },
-    {
-      name  = "KC_HOSTNAME_STRICT"
-      value = "false"
-    },
-    {
-      # HTTPS strict mode - Keycloak will require HTTPS for all requests
-      name  = "KC_HOSTNAME_STRICT_HTTPS"
+      # Issue #1122: KC25 listens HTTPS-only (8443) by default; KC23 listened
+      # HTTP (8080). The ALB target group health checks port 8080, so we must
+      # explicitly enable the HTTP listener on KC25. CloudFront → ALB is
+      # already TLS-terminated by ALB/CloudFront, so HTTP between ALB and
+      # Keycloak is fine within the VPC. KC_PROXY_HEADERS=xforwarded above
+      # makes Keycloak still recognize the client connection as HTTPS.
+      name  = "KC_HTTP_ENABLED"
       value = "true"
     },
     {
