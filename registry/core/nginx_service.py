@@ -387,7 +387,7 @@ class NginxConfigService:
                 f"and additional server names"
             )
 
-            self.reload_nginx(force=force_base_config)
+            await asyncio.to_thread(self.reload_nginx, force_base_config)
             return True
 
         except Exception as e:
@@ -743,7 +743,7 @@ class NginxConfigService:
                 elapsed,
                 self._min_reload_interval_seconds,
             )
-            return True
+            return False
 
         try:
             import subprocess  # nosec B404
@@ -771,7 +771,7 @@ class NginxConfigService:
             # to disk but never made active until the next reload (which may
             # never come for auto-registered demo servers).
             stderr = result.stderr or ""
-            if "invalid PID number" in stderr or "open()" in stderr and "nginx.pid" in stderr:
+            if "invalid PID number" in stderr or ("open()" in stderr and "nginx.pid" in stderr):
                 logger.warning(
                     "Nginx not yet started (pid file empty); will retry reload"
                 )
@@ -1531,12 +1531,15 @@ class NginxReloadScheduler:
 
                 async with nginx_service.reload_lock:
                     _atomic_write_text(settings.nginx_config_path, config_text)
-                    nginx_service.reload_nginx()
-                self._last_config_hash = new_hash
-                logger.info(
-                    "Debounced nginx reload completed (hash=%s)",
-                    new_hash[:12],
-                )
+                    reloaded = await asyncio.to_thread(nginx_service.reload_nginx)
+                if reloaded:
+                    self._last_config_hash = new_hash
+                    logger.info(
+                        "Debounced nginx reload completed (hash=%s)",
+                        new_hash[:12],
+                    )
+                else:
+                    self._dirty = True
             except Exception as e:
                 logger.error("Debounced nginx reload failed: %s", e)
                 self._dirty = True

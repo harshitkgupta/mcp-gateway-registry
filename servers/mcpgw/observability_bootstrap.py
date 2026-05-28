@@ -137,7 +137,15 @@ def init_meter_provider_if_needed() -> None:
         )
         return
 
-    prom_port = int(os.getenv("OTEL_EXPORTER_PROMETHEUS_PORT", "9464"))
+    _port_str = os.getenv("OTEL_EXPORTER_PROMETHEUS_PORT", "9464")
+    try:
+        prom_port = int(_port_str)
+    except ValueError:
+        logger.warning(
+            "Invalid OTEL_EXPORTER_PROMETHEUS_PORT=%r, falling back to 9464",
+            _port_str,
+        )
+        prom_port = 9464
     try:
         start_http_server(port=prom_port, addr=prom_host)
         reader = PrometheusMetricReader()

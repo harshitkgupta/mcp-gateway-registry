@@ -625,7 +625,7 @@ services:
   # graphical trace UI" section of docs/OBSERVABILITY.md for the small
   # config additions you can drop in.
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
+    image: otel/opentelemetry-collector-contrib:0.115.0
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./config/otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro
@@ -634,11 +634,21 @@ services:
       - "4318:4318"   # OTLP HTTP
       - "8889:8889"   # Prometheus exporter on the collector itself
       - "13133:13133" # health_check extension
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # Prometheus for metrics collection
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.1.0
     ports:
       - "9090:9090"
     volumes:
@@ -651,6 +661,10 @@ services:
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--storage.tsdb.retention.time=200h'
       - '--web.enable-lifecycle'
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # Grafana for metrics visualization
@@ -668,6 +682,10 @@ services:
       - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
     depends_on:
       - prometheus
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
 
   # PostgreSQL database for Keycloak

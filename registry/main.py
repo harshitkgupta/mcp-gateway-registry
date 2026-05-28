@@ -169,7 +169,11 @@ def _log_otel_state() -> None:
     if the OTLP endpoint uses HTTP to a non-localhost host (telemetry would
     be unencrypted in transit).
     """
-    from opentelemetry import metrics
+    try:
+        from opentelemetry import metrics
+    except ImportError:
+        logger.debug("opentelemetry not installed; skipping OTel state log")
+        return
 
     provider = metrics.get_meter_provider()
     provider_name = type(provider).__name__

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from opentelemetry import metrics
 
@@ -38,9 +38,6 @@ from registry.observability._compat import (
     _CounterAdapter,
     _HistogramAdapter,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 logger = logging.getLogger(__name__)
@@ -90,7 +87,15 @@ def _init_meter_provider_if_needed() -> None:
         )
         return
 
-    prom_port = int(os.getenv("OTEL_EXPORTER_PROMETHEUS_PORT", "9464"))
+    _port_str = os.getenv("OTEL_EXPORTER_PROMETHEUS_PORT", "9464")
+    try:
+        prom_port = int(_port_str)
+    except ValueError:
+        logger.warning(
+            "Invalid OTEL_EXPORTER_PROMETHEUS_PORT=%r, falling back to 9464",
+            _port_str,
+        )
+        prom_port = 9464
     try:
         # The exporter relies on prometheus_client's default REGISTRY.
         # Start the HTTP server first so that the listener is bound by the

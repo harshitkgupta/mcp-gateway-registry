@@ -46,6 +46,8 @@ spec:
           ports:
             - containerPort: {{ .Values.app.port }}
               name: http
+            - containerPort: 9464
+              name: metrics
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           envFrom:

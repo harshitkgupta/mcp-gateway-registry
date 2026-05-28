@@ -50,6 +50,8 @@ spec:
               name: https
             - containerPort: 7860
               name: registry
+            - containerPort: 9464
+              name: metrics
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           envFrom:
