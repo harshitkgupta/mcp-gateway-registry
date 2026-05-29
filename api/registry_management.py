@@ -571,6 +571,16 @@ def cmd_register(args: argparse.Namespace) -> int:
     try:
         config = _load_json_config(args.config)
 
+        # Detect upstream MCP Registry server.json schema and transform
+        from registry.schemas.mcp_registry_transform import (
+            is_mcp_registry_schema,
+            transform_mcp_registry_to_internal,
+        )
+
+        if is_mcp_registry_schema(config):
+            logger.info("Detected upstream MCP Registry server.json format, transforming...")
+            config = transform_mcp_registry_to_internal(config)
+
         # Convert config to InternalServiceRegistration
         # Handle both old and new config formats
         registration = InternalServiceRegistration(
