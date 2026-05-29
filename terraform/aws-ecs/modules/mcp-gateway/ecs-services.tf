@@ -1467,11 +1467,12 @@ resource "aws_vpc_security_group_ingress_rule" "auth_to_mcpgw" {
 }
 
 
-# ECS Service: CurrentTime MCP Server
+# ECS Service: CurrentTime MCP Server (demo, opt-in via enable_demo_servers)
 #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_currenttime" {
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
+  count   = var.enable_demo_servers ? 1 : 0
 
   name                     = "${local.name_prefix}-currenttime"
   cluster_arn              = var.ecs_cluster_arn
@@ -1832,11 +1833,12 @@ module "ecs_service_mcpgw" {
 }
 
 
-# ECS Service: RealServerFakeTools MCP Server
+# ECS Service: RealServerFakeTools MCP Server (demo, opt-in via enable_demo_servers)
 #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_realserverfaketools" {
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
+  count   = var.enable_demo_servers ? 1 : 0
 
   name                     = "${local.name_prefix}-realserverfaketools"
   cluster_arn              = var.ecs_cluster_arn
@@ -1954,11 +1956,12 @@ module "ecs_service_realserverfaketools" {
 }
 
 
-# ECS Service: Flight Booking A2A Agent
+# ECS Service: Flight Booking A2A Agent (demo, opt-in via enable_demo_servers)
 #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_flight_booking_agent" {
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
+  count   = var.enable_demo_servers ? 1 : 0
 
   name                     = "${local.name_prefix}-flight-booking-agent"
   cluster_arn              = var.ecs_cluster_arn
@@ -2076,11 +2079,12 @@ module "ecs_service_flight_booking_agent" {
 }
 
 
-# ECS Service: Travel Assistant A2A Agent
+# ECS Service: Travel Assistant A2A Agent (demo, opt-in via enable_demo_servers)
 #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_travel_assistant_agent" {
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
+  count   = var.enable_demo_servers ? 1 : 0
 
   name                     = "${local.name_prefix}-travel-assistant-agent"
   cluster_arn              = var.ecs_cluster_arn

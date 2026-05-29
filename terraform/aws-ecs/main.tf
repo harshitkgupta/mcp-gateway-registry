@@ -69,18 +69,21 @@ module "mcp_gateway" {
   enable_cloudfront           = var.enable_cloudfront
   cloudfront_prefix_list_name = local.cloudfront_prefix_list_name
 
-  # Container images
-  registry_image_uri               = var.registry_image_uri
-  auth_server_image_uri            = var.auth_server_image_uri
+  # Container images (core services default to public ECR)
+  registry_image_uri    = var.registry_image_uri
+  auth_server_image_uri = var.auth_server_image_uri
+  mcpgw_image_uri       = var.mcpgw_image_uri
+
+  # Demo servers (disabled by default)
+  enable_demo_servers              = var.enable_demo_servers
   currenttime_image_uri            = var.currenttime_image_uri
-  mcpgw_image_uri                  = var.mcpgw_image_uri
   realserverfaketools_image_uri    = var.realserverfaketools_image_uri
   flight_booking_agent_image_uri   = var.flight_booking_agent_image_uri
   travel_assistant_agent_image_uri = var.travel_assistant_agent_image_uri
 
   # Service replicas
-  currenttime_replicas            = var.currenttime_replicas
   mcpgw_replicas                  = var.mcpgw_replicas
+  currenttime_replicas            = var.currenttime_replicas
   realserverfaketools_replicas    = var.realserverfaketools_replicas
   flight_booking_agent_replicas   = var.flight_booking_agent_replicas
   travel_assistant_agent_replicas = var.travel_assistant_agent_replicas

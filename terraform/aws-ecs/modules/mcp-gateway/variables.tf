@@ -37,51 +37,57 @@ variable "task_execution_role_arn" {
   default     = ""
 }
 
-# Container Image URIs (pre-built images from Docker Hub)
+# Container Image URIs (pre-built images from public ECR)
 variable "registry_image_uri" {
-  description = "Container image URI for registry service (defaults to pre-built image from mcpgateway Docker Hub)"
+  description = "Container image URI for registry service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "mcpgateway/registry:latest"
+  default     = "public.ecr.aws/p3v1o3c6/registry:1.24.2"
 }
 
 variable "auth_server_image_uri" {
-  description = "Container image URI for auth server service (defaults to pre-built image from mcpgateway Docker Hub)"
+  description = "Container image URI for auth server service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "mcpgateway/auth-server:latest"
-}
-
-variable "currenttime_image_uri" {
-  description = "Container image URI for currenttime MCP server"
-  type        = string
-  default     = ""
+  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.24.2"
 }
 
 variable "mcpgw_image_uri" {
-  description = "Container image URI for mcpgw MCP server"
+  description = "Container image URI for mcpgw service (defaults to pre-built image from public ECR)"
+  type        = string
+  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.24.2"
+}
+
+variable "enable_demo_servers" {
+  description = "Deploy demo MCP servers and A2A agents (currenttime, realserverfaketools, flight-booking-agent, travel-assistant-agent). Requires setting the corresponding image URIs."
+  type        = bool
+  default     = false
+}
+
+variable "currenttime_image_uri" {
+  description = "Container image URI for currenttime MCP server (only used when enable_demo_servers is true)"
   type        = string
   default     = ""
 }
 
 variable "realserverfaketools_image_uri" {
-  description = "Container image URI for realserverfaketools MCP server"
+  description = "Container image URI for realserverfaketools MCP server (only used when enable_demo_servers is true)"
   type        = string
   default     = ""
 }
 
 variable "flight_booking_agent_image_uri" {
-  description = "Container image URI for flight booking A2A agent"
+  description = "Container image URI for flight booking A2A agent (only used when enable_demo_servers is true)"
   type        = string
   default     = ""
 }
 
 variable "travel_assistant_agent_image_uri" {
-  description = "Container image URI for travel assistant A2A agent"
+  description = "Container image URI for travel assistant A2A agent (only used when enable_demo_servers is true)"
   type        = string
   default     = ""
 }
 
 variable "dockerhub_org" {
-  description = "Docker Hub organization for pre-built images"
+  description = "DEPRECATED: Docker Hub organization. No longer used; images default to public ECR."
   type        = string
   default     = "mcpgateway"
 }
@@ -125,12 +131,12 @@ variable "auth_replicas" {
 }
 
 variable "currenttime_replicas" {
-  description = "Number of replicas for CurrentTime MCP server"
+  description = "Number of replicas for CurrentTime MCP server (only used when enable_demo_servers is true)"
   type        = number
   default     = 1
   validation {
-    condition     = var.currenttime_replicas > 0
-    error_message = "CurrentTime replicas must be greater than 0."
+    condition     = var.currenttime_replicas >= 0
+    error_message = "CurrentTime replicas must be 0 or greater."
   }
 }
 
@@ -145,32 +151,32 @@ variable "mcpgw_replicas" {
 }
 
 variable "realserverfaketools_replicas" {
-  description = "Number of replicas for RealServerFakeTools MCP server"
+  description = "Number of replicas for RealServerFakeTools MCP server (only used when enable_demo_servers is true)"
   type        = number
   default     = 1
   validation {
-    condition     = var.realserverfaketools_replicas > 0
-    error_message = "RealServerFakeTools replicas must be greater than 0."
+    condition     = var.realserverfaketools_replicas >= 0
+    error_message = "RealServerFakeTools replicas must be 0 or greater."
   }
 }
 
 variable "flight_booking_agent_replicas" {
-  description = "Number of replicas for Flight Booking A2A agent"
+  description = "Number of replicas for Flight Booking A2A agent (only used when enable_demo_servers is true)"
   type        = number
   default     = 1
   validation {
-    condition     = var.flight_booking_agent_replicas > 0
-    error_message = "Flight Booking agent replicas must be greater than 0."
+    condition     = var.flight_booking_agent_replicas >= 0
+    error_message = "Flight Booking agent replicas must be 0 or greater."
   }
 }
 
 variable "travel_assistant_agent_replicas" {
-  description = "Number of replicas for Travel Assistant A2A agent"
+  description = "Number of replicas for Travel Assistant A2A agent (only used when enable_demo_servers is true)"
   type        = number
   default     = 1
   validation {
-    condition     = var.travel_assistant_agent_replicas > 0
-    error_message = "Travel Assistant agent replicas must be greater than 0."
+    condition     = var.travel_assistant_agent_replicas >= 0
+    error_message = "Travel Assistant agent replicas must be 0 or greater."
   }
 }
 

@@ -233,19 +233,7 @@ aws configure
 aws sts get-caller-identity
 ```
 
-### Step 2: Build and Push Container Images (~30 min)
-
-```bash
-# Set your target AWS region
-export AWS_REGION=us-east-1
-
-# cd to the directory where you cloned this repo
-
-# Build and push all images
-make build-push
-```
-
-### Step 3: Configure terraform.tfvars
+### Step 2: Configure terraform.tfvars
 
 ```bash
 cd terraform/aws-ecs
@@ -258,13 +246,12 @@ cp terraform.tfvars.example terraform.tfvars
 
 | Parameter | Description |
 |-----------|-------------|
-| `aws_region` | AWS region (must match where you pushed ECR images) |
+| `aws_region` | AWS region for deployment |
 | `ingress_cidr_blocks` | IP addresses allowed to access the ALB |
 | `keycloak_admin_password` | Keycloak admin password (min 12 chars) |
 | `keycloak_database_password` | Database password (min 12 chars) |
 | `session_cookie_secure` | Set to `true` for HTTPS (all modes except development) |
 | `grafana_admin_password` | Grafana admin password (required when `enable_observability = true`) |
-| 7 ECR image URIs | Container image URIs with your account ID and region |
 
 **Mode-Specific Parameters:**
 
@@ -289,18 +276,6 @@ aws sts get-caller-identity --query Account --output text
 
 # Get your AWS region
 echo $AWS_REGION
-```
-
-**Auto-configure ECR image URIs with sed:**
-
-```bash
-# Set your values
-export AWS_REGION=us-east-1
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-# Update all 7 ECR image URIs in terraform.tfvars
-sed -i "s/YOUR_ACCOUNT_ID/${AWS_ACCOUNT_ID}/g" terraform.tfvars
-sed -i "s/YOUR_AWS_REGION/${AWS_REGION}/g" terraform.tfvars
 ```
 
 **Configure ingress_cidr_blocks:**
@@ -377,7 +352,7 @@ session_cookie_domain = ".your.domain"
 # ... plus all common parameters from Mode 1 example above
 ```
 
-### Step 4: Deploy Infrastructure (~20 min)
+### Step 3: Deploy Infrastructure (~20 min)
 
 **First-time deployments require a two-stage process due to SSL certificate dependencies.**
 
@@ -396,13 +371,52 @@ terraform apply \
 terraform apply
 ```
 
-### Step 5: Post-Deployment Setup
+### Step 4: Post-Deployment Setup
 
 See [Post-Deployment](#post-deployment) section for:
 - Initializing Keycloak
 - Running scopes initialization
 - Restarting ECS tasks
 - Accessing the Web UI
+
+---
+
+## Using Custom Images
+
+By default, the three core services (registry, auth-server, mcpgw) pull pre-built images from
+`public.ecr.aws/p3v1o3c6/`. No build step is required.
+
+To deploy your own custom-built images instead (e.g., with local modifications):
+
+1. Build and push images to your private ECR:
+   ```bash
+   export AWS_REGION=us-east-1
+   make build-push
+   ```
+
+2. Override image URIs in `terraform.tfvars`:
+   ```hcl
+   registry_image_uri    = "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mcp-gateway-registry:latest"
+   auth_server_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mcp-gateway-auth-server:latest"
+   mcpgw_image_uri       = "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mcp-gateway-mcpgw:latest"
+   ```
+
+3. Run `terraform apply`.
+
+### Deploying Demo Servers
+
+The demo MCP servers (currenttime, realserverfaketools) and A2A agents (flight-booking, travel-assistant)
+are disabled by default. To deploy them:
+
+```hcl
+enable_demo_servers              = true
+currenttime_image_uri            = "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mcp-gateway-currenttime:latest"
+realserverfaketools_image_uri    = "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mcp-gateway-realserverfaketools:latest"
+flight_booking_agent_image_uri   = "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mcp-gateway-flight-booking-agent:latest"
+travel_assistant_agent_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mcp-gateway-travel-assistant-agent:latest"
+```
+
+These images are not available on public ECR and must be built from source with `make build-push`.
 
 ---
 

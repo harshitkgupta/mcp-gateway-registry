@@ -96,23 +96,29 @@ keycloak_database_username = "keycloak"
 keycloak_database_password = "CHANGE-ME-DB-PASSWORD"
 
 # ============================================================================
-# CONTAINER IMAGE URIS (REQUIRED)
+# CONTAINER IMAGES (Optional - pre-built public ECR images used by default)
 # ============================================================================
+# Core services (registry, auth-server, mcpgw) default to pre-built images
+# from public.ecr.aws/p3v1o3c6/. No build step is required for a standard
+# deployment. Override below only if using custom-built images from your
+# private ECR (run `make build-push` first):
+#
+# registry_image_uri    = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-registry:latest"
+# auth_server_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-auth-server:latest"
+# mcpgw_image_uri       = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-mcpgw:latest"
 
-# Registry image from ECR
-registry_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-registry:latest"
-
-# Auth server image from ECR
-auth_server_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-auth-server:latest"
-
-# MCP Server images from ECR
-currenttime_image_uri         = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-currenttime:latest"
-mcpgw_image_uri               = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-mcpgw:latest"
-realserverfaketools_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-realserverfaketools:latest"
-
-# A2A Agent images from ECR
-flight_booking_agent_image_uri   = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-flight-booking-agent:latest"
-travel_assistant_agent_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-travel-assistant-agent:latest"
+# ============================================================================
+# DEMO SERVERS (Optional - disabled by default)
+# ============================================================================
+# To deploy demo MCP servers and A2A agents, set enable_demo_servers = true
+# and provide image URIs. These images are NOT available on public ECR and
+# must be built from source (run `make build-push`).
+#
+# enable_demo_servers = true
+# currenttime_image_uri            = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-currenttime:latest"
+# realserverfaketools_image_uri    = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-realserverfaketools:latest"
+# flight_booking_agent_image_uri   = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-flight-booking-agent:latest"
+# travel_assistant_agent_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-travel-assistant-agent:latest"
 
 # ============================================================================
 # OPTIONAL: ADDITIONAL CONFIGURATION
