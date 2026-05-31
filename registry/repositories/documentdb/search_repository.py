@@ -259,14 +259,17 @@ def _reciprocal_rank_fusion(
     return results
 
 
+SCORE_DISPLAY_FLOOR: float = 0.20
+
+
 def _normalize_scores(
     scored_results: list[tuple[dict, float]],
 ) -> list[tuple[dict, float]]:
-    """Normalize scores to [0, 1] range using min-max scaling.
+    """Normalize scores to [0, 1] and drop results below the display floor.
 
-    Maps the highest score to 1.0 and the lowest to a floor value,
-    preserving relative ordering. This is for display purposes only
-    (the ranking is already finalized before this is called).
+    Maps the highest score to 1.0 and scales others proportionally.
+    Results whose normalized score falls below SCORE_DISPLAY_FLOOR (20%)
+    are excluded entirely as they are too weakly related to display.
 
     For a single result, returns 1.0. For empty input, returns empty.
 
@@ -274,7 +277,7 @@ def _normalize_scores(
         scored_results: List of (doc, score) tuples (any score range).
 
     Returns:
-        Same list with scores mapped to [0, 1].
+        Filtered list with scores in [SCORE_DISPLAY_FLOOR, 1.0].
     """
     if not scored_results:
         return []
@@ -290,6 +293,8 @@ def _normalize_scores(
     normalized = []
     for doc, score in scored_results:
         norm = (score - min_score) / (max_score - min_score)
+        if norm < SCORE_DISPLAY_FLOOR:
+            continue
         normalized.append((doc, round(norm, 4)))
 
     return normalized

@@ -15,6 +15,7 @@ Covers:
 
 from registry.repositories.documentdb.search_repository import (
     RRF_K,
+    SCORE_DISPLAY_FLOOR,
     _normalize_scores,
     _reciprocal_rank_fusion,
     _score_tool_relevance,
@@ -222,13 +223,13 @@ class TestNormalizeScores:
         assert result[0][1] == 1.0
 
     def test_two_results(self):
-        """Two results: top gets 1.0, bottom gets 0.0."""
+        """Two results: top gets 1.0, bottom is excluded (below floor)."""
         result = _normalize_scores([
             (_make_doc("top"), 0.033),
             (_make_doc("bot"), 0.016),
         ])
         assert result[0][1] == 1.0
-        assert result[1][1] == 0.0
+        assert len(result) == 1
 
     def test_preserves_order(self):
         """Normalization preserves descending order."""
@@ -241,13 +242,14 @@ class TestNormalizeScores:
         scores = [s for _, s in result]
         assert scores == sorted(scores, reverse=True)
 
-    def test_maps_to_zero_one(self):
-        """All scores are in [0, 1] range."""
+    def test_filters_below_floor(self):
+        """Results below SCORE_DISPLAY_FLOOR are excluded."""
         result = _normalize_scores([
             (_make_doc(f"d{i}"), 0.03 - i * 0.002) for i in range(10)
         ])
         for _, score in result:
-            assert 0.0 <= score <= 1.0
+            assert SCORE_DISPLAY_FLOOR <= score <= 1.0
+        assert len(result) < 10
 
     def test_equal_scores_all_get_one(self):
         """If all scores are equal, all get 1.0."""

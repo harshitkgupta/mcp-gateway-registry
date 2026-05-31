@@ -131,7 +131,18 @@ if OIDC_ENABLED:
 else:
     logger.info("OAuth disabled – using bearer-token passthrough with M2M for registry calls")
 
-mcp = FastMCP("mcpgw", auth=_auth_provider)
+mcp = FastMCP(
+    "AI Registry",
+    instructions=(
+        "This server connects you to an AI Registry containing MCP servers, "
+        "tools, agents, and skills that you can discover and use. "
+        "Start with search_registry to find relevant AI assets by describing "
+        "what you need in natural language. Once you find a useful MCP server, "
+        "you can connect to it directly via its endpoint URL. "
+        "For skills, use get_skill_content to retrieve the full instructions."
+    ),
+    auth=_auth_provider,
+)
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -234,7 +245,11 @@ async def _get_registry_headers(ctx: Context | None) -> dict[str, str]:
 @track_tool()
 async def list_services(ctx: Context | None = None) -> dict[str, Any]:
     """
-    List all MCP servers registered in the gateway.
+    List all MCP servers registered in the registry. Use search_registry
+    instead if you know what capability you need (faster, ranked results).
+
+    Each server entry includes its endpoint URL, tools, and connection details.
+    Use this for browsing the full catalog or when you need an unfiltered list.
 
     Returns:
         Dictionary containing services, total_count, enabled_count, and status
@@ -303,7 +318,11 @@ async def list_services(ctx: Context | None = None) -> dict[str, Any]:
 @track_tool()
 async def list_agents(ctx: Context | None = None) -> dict[str, Any]:
     """
-    List all agents registered in the gateway.
+    List all agents registered in the registry. Use search_registry
+    instead if you know what task you need an agent for (faster, ranked).
+
+    Agents are autonomous services you can delegate tasks to. Each entry
+    includes the agent's URL, capabilities, and skills.
 
     Returns:
         Dictionary containing agents, total_count, and status
@@ -359,7 +378,12 @@ async def list_agents(ctx: Context | None = None) -> dict[str, Any]:
 @track_tool()
 async def list_skills(ctx: Context | None = None) -> dict[str, Any]:
     """
-    List all skills registered in the gateway.
+    List all skills registered in the registry. Use search_registry
+    instead if you know what workflow you need (faster, ranked results).
+
+    Skills are reusable workflow instructions (like slash commands) that
+    you can load and execute. Use get_skill_content to retrieve the full
+    markdown instructions for a discovered skill.
 
     Returns:
         Dictionary containing skills, total_count, and status
@@ -419,19 +443,17 @@ async def get_skill_content(
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
-    Fetch skill content from the registry.
+    Retrieve the full instructions for a skill. Call this after finding a
+    skill via search_registry to get its complete workflow markdown.
 
-    Without resource_path: returns the full SKILL.md markdown and resource manifest.
-    With resource_path: returns the content of a companion file (reference doc,
-    script, agent config, etc.) validated against the stored manifest.
-
-    Use this after list_skills or intelligent_tool_finder to retrieve the
-    complete workflow instructions for a skill, or to read companion resources
-    listed in the manifest.
+    The returned content is a SKILL.md file containing step-by-step
+    instructions you can follow to execute the workflow. Some skills also
+    have companion resources (reference docs, scripts, configs) listed in
+    the manifest that you can fetch with the resource_path parameter.
 
     Args:
-        skill_name: Name of the skill (e.g. "gerrit-workflow")
-        resource_path: Optional relative path to a companion resource
+        skill_name: Name of the skill (e.g. "pr-review", "mcp-builder")
+        resource_path: Optional path to a companion resource file
                        (e.g. "references/architecture.md")
 
     Returns:
@@ -489,12 +511,111 @@ async def get_skill_content(
 
 @mcp.tool()
 @track_tool()
+async def search_registry(
+    query: str,
+    max_results: int = 10,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """
+    Discover AI assets (MCP servers, tools, agents, skills) by describing
+    what you need. Use this as your first step when you need a capability
+    you don't currently have.
+
+    Results include connection details so you can use the discovered assets:
+    - Servers: have endpoint URLs you can connect to as MCP servers
+    - Tools: individual capabilities within servers (with input schemas)
+    - Agents: autonomous agents you can delegate tasks to
+    - Skills: workflow instructions you can retrieve with get_skill_content
+
+    Examples:
+        "search documentation" -> finds doc search servers
+        "book flights hotels" -> finds travel booking tools
+        "code review" -> finds PR review skills and agents
+
+    Args:
+        query: What capability or tool you are looking for (natural language)
+        max_results: Number of results to return (default: 10, max: 50)
+
+    Returns:
+        Dictionary with servers, tools, agents, skills arrays and metadata
+    """
+    logger.info(f"search_registry called: query={query}, max_results={max_results}")
+
+    try:
+        query = _validate_query(query)
+        max_results = _validate_top_n(max_results)
+        headers = await _get_registry_headers(ctx)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{REGISTRY_URL}/api/search/semantic",
+                headers=headers,
+                json={
+                    "query": query,
+                    "entity_types": [
+                        "mcp_server",
+                        "tool",
+                        "a2a_agent",
+                        "skill",
+                        "virtual_server",
+                    ],
+                    "max_results": max_results,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        servers = data.get("servers", []) if isinstance(data, dict) else []
+        tools = data.get("tools", []) if isinstance(data, dict) else []
+        agents = data.get("agents", []) if isinstance(data, dict) else []
+        skills = data.get("skills", []) if isinstance(data, dict) else []
+
+        return {
+            "servers": servers,
+            "tools": tools,
+            "agents": agents,
+            "skills": skills,
+            "query": query,
+            "total_results": len(servers) + len(tools) + len(agents) + len(skills),
+            "status": "success",
+        }
+
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        return {
+            "query": query,
+            "total_results": 0,
+            "error": str(e),
+            "status": "failed",
+        }
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error: {e.response.status_code}")
+        return {
+            "query": query,
+            "total_results": 0,
+            "error": f"Registry API error: {e.response.status_code}",
+            "status": "failed",
+        }
+    except Exception as e:
+        logger.error(f"Failed to search registry: {e}")
+        return {
+            "query": query,
+            "total_results": 0,
+            "error": str(e),
+            "status": "failed",
+        }
+
+
+@mcp.tool()
+@track_tool()
 async def intelligent_tool_finder(
     query: str,
     top_n: int = 5,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
+    DEPRECATED: Use search_registry instead. This tool will be removed in v1.26.0.
+
     Search for tools using natural language semantic search.
 
     Args:
@@ -517,7 +638,7 @@ async def intelligent_tool_finder(
                 headers=headers,
                 json={
                     "query": query,
-                    "entity_types": ["mcp_server", "tool", "virtual_server"],
+                    "entity_types": ["mcp_server", "tool", "a2a_agent", "skill", "virtual_server"],
                     "max_results": top_n,
                 },
             )
