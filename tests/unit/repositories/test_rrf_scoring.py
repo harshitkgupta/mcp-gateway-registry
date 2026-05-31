@@ -15,7 +15,9 @@ Covers:
 
 from registry.repositories.documentdb.search_repository import (
     RRF_K,
+    _normalize_scores,
     _reciprocal_rank_fusion,
+    _score_tool_relevance,
 )
 
 
@@ -205,3 +207,101 @@ class TestReciprocalRankFusion:
 
         scores = {doc["_id"]: score for doc, score in result}
         assert scores["atlassian"] > 0
+
+
+class TestNormalizeScores:
+    """Tests for _normalize_scores()."""
+
+    def test_empty_input(self):
+        """Empty list returns empty."""
+        assert _normalize_scores([]) == []
+
+    def test_single_result(self):
+        """Single result normalizes to 1.0."""
+        result = _normalize_scores([(_make_doc("a"), 0.016)])
+        assert result[0][1] == 1.0
+
+    def test_two_results(self):
+        """Two results: top gets 1.0, bottom gets 0.0."""
+        result = _normalize_scores([
+            (_make_doc("top"), 0.033),
+            (_make_doc("bot"), 0.016),
+        ])
+        assert result[0][1] == 1.0
+        assert result[1][1] == 0.0
+
+    def test_preserves_order(self):
+        """Normalization preserves descending order."""
+        result = _normalize_scores([
+            (_make_doc("a"), 0.033),
+            (_make_doc("b"), 0.025),
+            (_make_doc("c"), 0.020),
+            (_make_doc("d"), 0.016),
+        ])
+        scores = [s for _, s in result]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_maps_to_zero_one(self):
+        """All scores are in [0, 1] range."""
+        result = _normalize_scores([
+            (_make_doc(f"d{i}"), 0.03 - i * 0.002) for i in range(10)
+        ])
+        for _, score in result:
+            assert 0.0 <= score <= 1.0
+
+    def test_equal_scores_all_get_one(self):
+        """If all scores are equal, all get 1.0."""
+        result = _normalize_scores([
+            (_make_doc("a"), 0.02),
+            (_make_doc("b"), 0.02),
+            (_make_doc("c"), 0.02),
+        ])
+        for _, score in result:
+            assert score == 1.0
+
+
+class TestScoreToolRelevance:
+    """Tests for _score_tool_relevance()."""
+
+    def test_no_tokens(self):
+        """Empty tokens returns 0."""
+        assert _score_tool_relevance("search", "searches stuff", []) == 0.0
+
+    def test_name_match(self):
+        """Token matching tool name gives high score."""
+        score = _score_tool_relevance("web_search_exa", "Web search", ["search"])
+        assert score > 0.5
+
+    def test_description_only_match(self):
+        """Token matching only description gives lower score."""
+        score = _score_tool_relevance("get_data", "Fetches search results", ["search"])
+        assert 0.0 < score < 0.8
+
+    def test_no_match(self):
+        """No token overlap returns 0."""
+        score = _score_tool_relevance("get_weather", "Returns forecast", ["database"])
+        assert score == 0.0
+
+    def test_multiple_token_match(self):
+        """Multiple tokens matching gives higher score."""
+        score_one = _score_tool_relevance(
+            "search_docs", "Search documentation", ["search"]
+        )
+        score_both = _score_tool_relevance(
+            "search_docs", "Search documentation", ["search", "docs"]
+        )
+        assert score_both > score_one
+
+    def test_score_capped_at_one(self):
+        """Score never exceeds 1.0."""
+        score = _score_tool_relevance(
+            "search_web_crawl_fetch",
+            "search web crawl fetch extract data",
+            ["search", "web", "crawl", "fetch", "extract", "data"],
+        )
+        assert score <= 1.0
+
+    def test_no_inherited_server_score(self):
+        """Tools that don't match query get 0, not a server-inherited score."""
+        score = _score_tool_relevance("getStats", "Get activity stats", ["strava"])
+        assert score == 0.0

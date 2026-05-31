@@ -259,6 +259,85 @@ def _reciprocal_rank_fusion(
     return results
 
 
+def _normalize_scores(
+    scored_results: list[tuple[dict, float]],
+) -> list[tuple[dict, float]]:
+    """Normalize scores to [0, 1] range using min-max scaling.
+
+    Maps the highest score to 1.0 and the lowest to a floor value,
+    preserving relative ordering. This is for display purposes only
+    (the ranking is already finalized before this is called).
+
+    For a single result, returns 1.0. For empty input, returns empty.
+
+    Args:
+        scored_results: List of (doc, score) tuples (any score range).
+
+    Returns:
+        Same list with scores mapped to [0, 1].
+    """
+    if not scored_results:
+        return []
+    if len(scored_results) == 1:
+        return [(scored_results[0][0], 1.0)]
+
+    max_score = scored_results[0][1]
+    min_score = scored_results[-1][1]
+
+    if max_score == min_score:
+        return [(doc, 1.0) for doc, _ in scored_results]
+
+    normalized = []
+    for doc, score in scored_results:
+        norm = (score - min_score) / (max_score - min_score)
+        normalized.append((doc, round(norm, 4)))
+
+    return normalized
+
+
+def _score_tool_relevance(
+    tool_name: str,
+    tool_description: str,
+    query_tokens: list[str],
+) -> float:
+    """Score a tool independently based on keyword match strength.
+
+    Returns a score between 0.0 and 1.0 based on how well the tool's
+    name and description match the query tokens.
+
+    Args:
+        tool_name: The tool's name
+        tool_description: The tool's description
+        query_tokens: Tokenized query
+
+    Returns:
+        Score from 0.0 to 1.0
+    """
+    if not query_tokens:
+        return 0.0
+
+    score = 0.0
+    name_lower = tool_name.lower()
+    desc_lower = tool_description.lower()
+
+    matched_tokens = 0
+    for token in query_tokens:
+        if token in name_lower:
+            score += 0.5
+            matched_tokens += 1
+        elif token in desc_lower:
+            score += 0.3
+            matched_tokens += 1
+
+    if not matched_tokens:
+        return 0.0
+
+    token_coverage = matched_tokens / len(query_tokens)
+    score = min(1.0, score) * 0.7 + token_coverage * 0.3
+
+    return round(min(1.0, score), 4)
+
+
 def _build_status_filter(
     include_draft: bool = False,
     include_deprecated: bool = False,
@@ -1286,27 +1365,17 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                 for tool in tools:
                     tool_name = tool.get("name", "")
                     tool_desc = tool.get("description") or ""
-                    tool_matched = _tokens_match_text(
-                        query_tokens, tool_name
-                    ) or _tokens_match_text(query_tokens, tool_desc)
+                    tool_score = _score_tool_relevance(
+                        tool_name, tool_desc, query_tokens
+                    )
 
-                    if tool_matched:
+                    if tool_score > 0:
                         text_boost += 1.0
                         matching_tools.append(
                             {
                                 "tool_name": tool_name,
                                 "description": tool_desc,
-                                "relevance_score": 1.0,
-                                "match_context": tool_desc
-                                or f"Tool: {tool_name}",
-                            }
-                        )
-                    elif server_name_matched:
-                        matching_tools.append(
-                            {
-                                "tool_name": tool_name,
-                                "description": tool_desc,
-                                "relevance_score": 0.8,
+                                "relevance_score": tool_score,
                                 "match_context": tool_desc
                                 or f"Tool: {tool_name}",
                             }
@@ -1362,6 +1431,9 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                 scored_tuples.sort(key=lambda x: x[1], reverse=True)
 
             selected = _distribute_results(scored_tuples, max_results)
+
+            if settings.search_fusion_method == "rrf":
+                selected = _normalize_scores(selected)
 
             # Format results to match the API contract
             grouped_results: dict[str, list[dict[str, Any]]] = {
@@ -1422,7 +1494,7 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                                 "tool_name": tool_name,
                                 "description": tool.get("description", ""),
                                 "inputSchema": tool_schema_map.get(tool_name, {}),
-                                "relevance_score": tool.get("relevance_score", relevance_score),
+                                "relevance_score": tool.get("relevance_score", 0.0),
                                 "match_context": tool.get("match_context", ""),
                             }
                         )
@@ -1681,7 +1753,7 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                             "tool_name": tool_name,
                             "description": tool.get("description", ""),
                             "inputSchema": tool_schema_map.get(tool_name, {}),
-                            "relevance_score": tool.get("relevance_score", relevance_score),
+                            "relevance_score": tool.get("relevance_score", 0.0),
                             "match_context": tool.get("match_context", ""),
                         }
                     )
@@ -1937,22 +2009,20 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                     tools = kw_doc.get("tools", [])
                     matching_tools = []
                     for tool in tools:
-                        tool_name = (tool.get("name") or "").lower()
-                        tool_desc = (tool.get("description") or "").lower()
-                        # Check if any token matches tool name or description
-                        tool_matches = any(
-                            token.lower() in tool_name or token.lower() in tool_desc
-                            for token in query_tokens
+                        t_name = tool.get("name") or ""
+                        t_desc = tool.get("description") or ""
+                        tool_score = _score_tool_relevance(
+                            t_name, t_desc, query_tokens
                         )
-                        if tool_matches:
-                            kw_text_boost += 1.0  # Tool match
+                        if tool_score > 0:
+                            kw_text_boost += 1.0
                             matching_tools.append(
                                 {
-                                    "tool_name": tool.get("name", ""),
-                                    "description": tool.get("description", ""),
-                                    "relevance_score": 1.0,
-                                    "match_context": tool.get("description")
-                                    or f"Tool: {tool.get('name', '')}",
+                                    "tool_name": t_name,
+                                    "description": t_desc,
+                                    "relevance_score": tool_score,
+                                    "match_context": t_desc
+                                    or f"Tool: {t_name}",
                                 }
                             )
 
@@ -2010,6 +2080,9 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                 scored_results.sort(key=lambda x: x[1], reverse=True)
 
             selected_results = _distribute_results(scored_results, max_results)
+
+            if settings.search_fusion_method == "rrf":
+                selected_results = _normalize_scores(selected_results)
 
             # Group selected results by entity type for the response
             grouped_results: dict[str, list[dict[str, Any]]] = {
@@ -2069,7 +2142,7 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                                 "tool_name": tool_name,
                                 "description": tool.get("description", ""),
                                 "inputSchema": tool_schema_map.get(tool_name, {}),
-                                "relevance_score": tool.get("relevance_score", relevance_score),
+                                "relevance_score": tool.get("relevance_score", 0.0),
                                 "match_context": tool.get("match_context", ""),
                             }
                         )
