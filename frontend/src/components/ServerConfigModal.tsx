@@ -46,12 +46,16 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
   const { config: registryConfig, loading: configLoading } = useRegistryConfig();
 
   const enabledIDEs: IDE[] = React.useMemo(() => {
-    const allIDEs = Object.keys(IDE_LABELS) as IDE[];
+    let allIDEs = Object.keys(IDE_LABELS) as IDE[];
+    // CLI (curl) and Codex URL mode don't apply to local stdio servers
+    if (server.deployment === 'local') {
+      allIDEs = allIDEs.filter((ide) => ide !== 'cli' && ide !== 'codex');
+    }
     const allowlist = registryConfig?.coding_assistants ?? [];
     if (allowlist.length === 0) return allIDEs;
     const filtered = allIDEs.filter((ide) => allowlist.includes(ide));
     return filtered.length > 0 ? filtered : allIDEs;
-  }, [registryConfig?.coding_assistants]);
+  }, [registryConfig?.coding_assistants, server.deployment]);
 
   const [selectedIDE, setSelectedIDE] = useState<IDE>(enabledIDEs[0] ?? 'cursor');
 
@@ -354,17 +358,6 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
           },
         };
       case 'codex':
-        return {
-          mcpServers: {
-            [serverName]: {
-              type: 'url',
-              url,
-              ...(includeAuthHeaders && !isDCR && {
-                headers: buildHeaders(),
-              }),
-            },
-          },
-        };
       case 'cli':
         return null;
       default:
@@ -380,6 +373,33 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
         };
     }
   }, [server.name, server.path, server.proxy_pass_url, server.mcp_endpoint, server.auth_scheme, server.auth_header_name, selectedIDE, isRegistryOnly, isDCR, jwtToken, customHeaders]);
+
+  const generateCodexCommand = useCallback(() => {
+    let url: string;
+    if (server.mcp_endpoint) {
+      url = server.mcp_endpoint;
+    } else if (isRegistryOnly && server.proxy_pass_url) {
+      url = server.proxy_pass_url;
+    } else {
+      const baseUrl = `${window.location.origin}${getBaseURL()}`;
+      const cleanPath = server.path.replace(/\/+$/, '').replace(/^\/+/, '/');
+      const proxyUrl = server.proxy_pass_url || '';
+      const hasMcpPath = /\/(mcp|sse|v1)(\/.*)?$/.test(proxyUrl);
+      url = hasMcpPath ? `${baseUrl}${cleanPath}` : `${baseUrl}${cleanPath}/mcp`;
+    }
+
+    const serverName = server.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+    let cmd = `codex mcp add "${serverName}" --url "${url}"`;
+
+    if (isDCR) {
+      cmd += ' --oauth-client-id "codex-cli"';
+    } else if (!isRegistryOnly) {
+      cmd += ' --bearer-token-env-var "MCP_AUTH_TOKEN"';
+    }
+
+    return cmd;
+  }, [server.name, server.path, server.proxy_pass_url, server.mcp_endpoint, isRegistryOnly, isDCR]);
 
   const generateCurlCommands = useCallback(() => {
     let url: string;
@@ -808,6 +828,36 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
               <p className="text-xs text-gray-600 dark:text-gray-400 mt-2">
                 Run this command in your terminal to add the MCP server to Claude Code.
               </p>
+            </div>
+          ) : selectedIDE === 'codex' ? (
+            <div className="space-y-2">
+              <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-3">
+                <h4 className="font-medium text-blue-900 dark:text-blue-100 mb-2">Codex CLI:</h4>
+                <p className="text-sm text-blue-800 dark:text-blue-200">
+                  Run this command in your terminal to add the MCP server to Codex.
+                  {isDCR && ' OAuth authentication is handled automatically via DCR.'}
+                </p>
+              </div>
+              <div className="flex items-center justify-between">
+                <h4 className="font-medium text-gray-900 dark:text-white">Command:</h4>
+                <button
+                  onClick={() => copyCurlToClipboard(generateCodexCommand())}
+                  className={`flex items-center gap-2 px-3 py-2 text-white rounded-lg transition-colors duration-200 ${
+                    copied ? 'bg-green-700' : 'bg-green-600 hover:bg-green-700'
+                  }`}
+                >
+                  <ClipboardDocumentIcon className="h-4 w-4" />
+                  {copied ? 'Copied!' : 'Copy Command'}
+                </button>
+              </div>
+              <pre className="bg-gray-900 text-green-100 p-4 rounded-lg text-sm overflow-x-auto whitespace-pre-wrap break-all">
+                {generateCodexCommand()}
+              </pre>
+              {!isDCR && !isRegistryOnly && (
+                <p className="text-xs text-gray-600 dark:text-gray-400 mt-2">
+                  Set the <code className="bg-gray-200 dark:bg-gray-700 px-1 rounded">MCP_AUTH_TOKEN</code> environment variable to your JWT token before running Codex.
+                </p>
+              )}
             </div>
           ) : selectedIDE === 'cli' ? (
             <div className="space-y-4">
