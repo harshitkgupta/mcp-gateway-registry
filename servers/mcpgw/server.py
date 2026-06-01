@@ -36,12 +36,15 @@ logger.info(
 )
 
 REGISTRY_URL = os.getenv("REGISTRY_BASE_URL", "http://localhost")
+REGISTRY_EXTERNAL_URL = os.getenv("REGISTRY_EXTERNAL_URL", "")
 
 MAX_QUERY_LENGTH: int = 500
 MIN_TOP_N: int = 1
 MAX_TOP_N: int = 50
 
 logger.info(f"Registry URL: {REGISTRY_URL}")
+if REGISTRY_EXTERNAL_URL:
+    logger.info(f"Registry External URL: {REGISTRY_EXTERNAL_URL}")
 
 # ---------------------------------------------------------------------------
 # OAuth configuration (optional – enable via OIDC_ENABLED=true)
@@ -242,12 +245,13 @@ async def _get_registry_headers(ctx: Context | None) -> dict[str, str]:
         token = _extract_bearer_token(ctx)
         headers = {"X-Authorization": f"Bearer {token}"}
 
-    from urllib.parse import urlparse
+    if REGISTRY_EXTERNAL_URL:
+        from urllib.parse import urlparse
 
-    parsed = urlparse(REGISTRY_URL)
-    if parsed.hostname and parsed.hostname not in ("localhost", "registry", "127.0.0.1"):
-        headers["X-Forwarded-Host"] = parsed.netloc
-        headers["X-Forwarded-Proto"] = parsed.scheme or "https"
+        parsed = urlparse(REGISTRY_EXTERNAL_URL)
+        if parsed.hostname:
+            headers["X-Forwarded-Host"] = parsed.netloc
+            headers["X-Forwarded-Proto"] = parsed.scheme or "https"
 
     return headers
 
