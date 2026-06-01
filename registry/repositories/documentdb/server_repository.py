@@ -120,15 +120,26 @@ class DocumentDBServerRepository(ServerRepositoryBase):
             logger.error(f"Error getting server '{path}' from DocumentDB: {e}", exc_info=True)
             return None
 
-    async def list_all(self) -> dict[str, dict[str, Any]]:
-        """List all servers."""
+    async def list_all(
+        self,
+        exclude_tool_list: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        """List all servers.
+
+        Args:
+            exclude_tool_list: If True, project out the ``tool_list`` field so
+                heavy tool schemas are not transferred from the database.
+        """
         logger.debug(
-            f"DocumentDB READ: Listing all servers from collection '{self._collection_name}'"
+            f"DocumentDB READ: Listing all servers from collection '{self._collection_name}' "
+            f"(exclude_tool_list={exclude_tool_list})"
         )
         collection = await self._get_collection()
 
+        projection = {"tool_list": 0} if exclude_tool_list else None
+
         try:
-            cursor = collection.find({})
+            cursor = collection.find({}, projection)
             servers = {}
             async for doc in cursor:
                 path = doc.pop("_id")
@@ -146,24 +157,29 @@ class DocumentDBServerRepository(ServerRepositoryBase):
         self,
         skip: int = 0,
         limit: int = 100,
+        exclude_tool_list: bool = False,
     ) -> dict[str, dict[str, Any]]:
         """List servers with DB-level skip/limit pagination.
 
         Args:
             skip: Number of documents to skip.
             limit: Maximum number of documents to return.
+            exclude_tool_list: If True, project out the ``tool_list`` field so
+                heavy tool schemas are not transferred from the database.
 
         Returns:
             Dictionary mapping server path to server info for the requested page.
         """
         logger.debug(
             f"DocumentDB READ: Listing paginated servers (skip={skip}, limit={limit}) "
-            f"from collection '{self._collection_name}'"
+            f"from collection '{self._collection_name}' (exclude_tool_list={exclude_tool_list})"
         )
         collection = await self._get_collection()
 
+        projection = {"tool_list": 0} if exclude_tool_list else None
+
         try:
-            cursor = collection.find({}).sort("_id", 1).skip(skip).limit(limit)
+            cursor = collection.find({}, projection).sort("_id", 1).skip(skip).limit(limit)
             servers = {}
             async for doc in cursor:
                 path = doc.pop("_id")
@@ -176,6 +192,46 @@ class DocumentDBServerRepository(ServerRepositoryBase):
             return servers
         except Exception as e:
             logger.error(f"Error listing paginated servers from DocumentDB: {e}", exc_info=True)
+            return {}
+
+    async def list_by_ids(
+        self,
+        paths: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """List servers whose _id is in the given set of paths.
+
+        Only exact paths are matched, so version documents
+        (``{path}:{version}``) are never returned.
+
+        Args:
+            paths: Exact server paths to fetch.
+
+        Returns:
+            Dictionary mapping server path to server info for found paths.
+        """
+        if not paths:
+            return {}
+
+        logger.debug(
+            f"DocumentDB READ: Listing {len(paths)} servers by id "
+            f"from collection '{self._collection_name}'"
+        )
+        collection = await self._get_collection()
+
+        try:
+            cursor = collection.find({"_id": {"$in": paths}})
+            servers = {}
+            async for doc in cursor:
+                path = doc.pop("_id")
+                doc["path"] = path
+                servers[path] = doc
+            logger.info(
+                f"DocumentDB READ: Retrieved {len(servers)} of {len(paths)} requested servers "
+                f"from collection '{self._collection_name}'"
+            )
+            return servers
+        except Exception as e:
+            logger.error(f"Error listing servers by ids from DocumentDB: {e}", exc_info=True)
             return {}
 
     async def list_by_source(
@@ -380,6 +436,22 @@ class DocumentDBServerRepository(ServerRepositoryBase):
         if server_info:
             return server_info.get("is_enabled", False)
         return False
+
+    async def get_all_states(self) -> dict[str, bool]:
+        """Get enabled/disabled state for all servers in a single query."""
+        collection = await self._get_collection()
+
+        try:
+            cursor = collection.find({}, {"_id": 1, "is_enabled": 1})
+            states: dict[str, bool] = {}
+            async for doc in cursor:
+                server_path = doc.get("_id")
+                if server_path:
+                    states[server_path] = doc.get("is_enabled", False)
+            return states
+        except Exception as e:
+            logger.error(f"Error getting all server states from DocumentDB: {e}", exc_info=True)
+            return {}
 
     async def set_state(
         self,

@@ -35,8 +35,20 @@ class ServerRepositoryBase(ABC):
         pass
 
     @abstractmethod
-    async def list_all(self) -> dict[str, dict[str, Any]]:
-        """List all servers."""
+    async def list_all(
+        self,
+        exclude_tool_list: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        """List all servers.
+
+        Args:
+            exclude_tool_list: If True, omit the heavy ``tool_list`` field from
+                each document (DB-side projection) to cut transfer for callers
+                that only need metadata. ``num_tools`` is unaffected.
+
+        Returns:
+            Dictionary mapping server path to server info.
+        """
         pass
 
     @abstractmethod
@@ -44,15 +56,37 @@ class ServerRepositoryBase(ABC):
         self,
         skip: int = 0,
         limit: int = 100,
+        exclude_tool_list: bool = False,
     ) -> dict[str, dict[str, Any]]:
         """List servers with DB-level pagination.
 
         Args:
             skip: Number of documents to skip.
             limit: Maximum number of documents to return.
+            exclude_tool_list: If True, omit the heavy ``tool_list`` field from
+                each document (DB-side projection). ``num_tools`` is unaffected.
 
         Returns:
             Dictionary mapping server path to server info for the requested page.
+        """
+        pass
+
+    @abstractmethod
+    async def list_by_ids(
+        self,
+        paths: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """List servers whose path (_id) is in the given set.
+
+        Used to fetch only the servers a restricted user can access without
+        scanning the full collection. Version documents (``{path}:{version}``)
+        are never matched because only exact active paths are queried.
+
+        Args:
+            paths: Exact server paths to fetch.
+
+        Returns:
+            Dictionary mapping server path to server info for found paths.
         """
         pass
 
@@ -120,6 +154,15 @@ class ServerRepositoryBase(ABC):
         path: str,
     ) -> bool:
         """Get server enabled/disabled state."""
+        pass
+
+    @abstractmethod
+    async def get_all_states(self) -> dict[str, bool]:
+        """Get enabled/disabled state for all servers in a single query.
+
+        Returns:
+            Dict mapping server path to enabled (True) or disabled (False).
+        """
         pass
 
     @abstractmethod

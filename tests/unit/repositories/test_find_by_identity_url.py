@@ -30,7 +30,7 @@ class _FakeServerRepo(ServerRepositoryBase):
     def __init__(self, servers: dict[str, dict[str, Any]]):
         self._servers = servers
 
-    async def list_all(self) -> dict[str, dict[str, Any]]:
+    async def list_all(self, exclude_tool_list=False) -> dict[str, dict[str, Any]]:
         return dict(self._servers)
 
     # Abstract methods that are not exercised by these tests — stub out
@@ -38,8 +38,11 @@ class _FakeServerRepo(ServerRepositoryBase):
     async def get(self, path):  # pragma: no cover - unused
         return self._servers.get(path)
 
-    async def list_paginated(self, skip=0, limit=100):  # pragma: no cover
+    async def list_paginated(self, skip=0, limit=100, exclude_tool_list=False):  # pragma: no cover
         return {}
+
+    async def list_by_ids(self, paths):  # pragma: no cover
+        return {p: self._servers[p] for p in paths if p in self._servers}
 
     async def list_by_source(self, source):  # pragma: no cover
         return {}
@@ -58,6 +61,9 @@ class _FakeServerRepo(ServerRepositoryBase):
 
     async def get_state(self, path):  # pragma: no cover
         return False
+
+    async def get_all_states(self):  # pragma: no cover
+        return {}
 
     async def set_state(self, path, enabled):  # pragma: no cover
         return False

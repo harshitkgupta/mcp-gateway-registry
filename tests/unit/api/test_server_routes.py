@@ -445,7 +445,9 @@ class TestGetServersJSON:
         assert data["limit"] == 20
         assert data["offset"] == 0
         assert data["has_next"] is False
-        mock_server_service.get_servers_paginated.assert_called_once_with(skip=0, limit=20)
+        mock_server_service.get_servers_paginated.assert_called_once_with(
+            skip=0, limit=20, exclude_tool_list=False
+        )
 
     def test_list_response_includes_local_server_fields(
         self, test_client_admin, mock_server_service
@@ -590,6 +592,74 @@ class TestGetServersJSON:
         data = response.json()
         assert data["servers"][0]["health_status"] == "healthy"
         assert data["servers"][0]["last_checked_iso"] == "2025-01-01T12:00:00Z"
+
+    def test_include_tools_false_omits_tool_list(self, test_client_admin, mock_server_service):
+        """include_tools=false drops the heavy tool_list but keeps num_tools
+        from the stored doc, letting the dashboard render the tool-count badge
+        without paying for per-server tool schemas + filtering."""
+        # Arrange - server doc carries both num_tools and a populated tool_list
+        mock_server_service.get_servers_paginated = AsyncMock(
+            return_value=(
+                {
+                    "/server1": {
+                        "server_name": "Server 1",
+                        "description": "Test",
+                        "tags": [],
+                        "num_tools": 3,
+                        "license": "MIT",
+                        "proxy_pass_url": "http://localhost:8080",
+                        "tool_list": [
+                            {"name": "tool_a", "description": "A"},
+                            {"name": "tool_b", "description": "B"},
+                            {"name": "tool_c", "description": "C"},
+                        ],
+                    }
+                },
+                1,
+            )
+        )
+
+        # Act
+        response = test_client_admin.get("/api/servers?include_tools=false")
+
+        # Assert
+        assert response.status_code == 200
+        server = response.json()["servers"][0]
+        assert server["tool_list"] == []
+        assert server["num_tools"] == 3
+
+    def test_include_tools_true_returns_tool_list(self, test_client_admin, mock_server_service):
+        """Default (include_tools=true) still returns the per-server tool_list
+        so API consumers keep full payloads."""
+        # Arrange
+        mock_server_service.get_servers_paginated = AsyncMock(
+            return_value=(
+                {
+                    "/server1": {
+                        "server_name": "Server 1",
+                        "description": "Test",
+                        "tags": [],
+                        "num_tools": 2,
+                        "license": "MIT",
+                        "proxy_pass_url": "http://localhost:8080",
+                        "tool_list": [
+                            {"name": "tool_a", "description": "A"},
+                            {"name": "tool_b", "description": "B"},
+                        ],
+                    }
+                },
+                1,
+            )
+        )
+
+        # Act
+        response = test_client_admin.get("/api/servers")
+
+        # Assert
+        assert response.status_code == 200
+        server = response.json()["servers"][0]
+        assert len(server["tool_list"]) == 2
+        assert server["num_tools"] == 2
 
 
 # =============================================================================
