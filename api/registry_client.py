@@ -1610,6 +1610,7 @@ class RegistryClient:
             or endpoint.startswith("/api/peers")
             or endpoint.startswith("/api/skills")
             or endpoint.startswith("/api/virtual-servers")
+            or endpoint.startswith("/api/admin")
             or endpoint.startswith("/api/v1/registry")
             or endpoint.startswith("/api/v1/health")
             or endpoint == "/api/servers/groups/import"

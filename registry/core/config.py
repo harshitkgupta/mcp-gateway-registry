@@ -157,6 +157,11 @@ class Settings(BaseSettings):
     # Default 40 may miss documents in small collections; 100 gives near-exact recall.
     vector_search_ef_search: int = 100
 
+    # Search fusion method: 'rrf' (Reciprocal Rank Fusion, industry standard)
+    # or 'legacy' (previous additive formula). RRF avoids score saturation and
+    # handles missing embeddings gracefully.
+    search_fusion_method: str = "rrf"
+
     # LiteLLM-specific settings (only used when embeddings_provider='litellm')
     # For Bedrock: Set to None and configure AWS credentials via standard methods
     # (IAM roles, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY env vars, or ~/.aws/credentials)

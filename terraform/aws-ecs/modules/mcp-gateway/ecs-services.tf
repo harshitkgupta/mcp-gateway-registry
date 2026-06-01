@@ -1744,6 +1744,10 @@ module "ecs_service_mcpgw" {
           value = "http://registry:8080"
         },
         {
+          name  = "REGISTRY_EXTERNAL_URL"
+          value = "https://${var.domain_name}"
+        },
+        {
           name  = "REGISTRY_USERNAME"
           value = "admin"
         },

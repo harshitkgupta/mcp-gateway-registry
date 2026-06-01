@@ -4928,6 +4928,126 @@ def cmd_logs(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_embeddings_missing(args: argparse.Namespace) -> int:
+    """Find documents missing from the search embeddings index.
+
+    Args:
+        args: Parsed command line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    try:
+        client = _create_client(args)
+
+        response = client._make_request(
+            method="GET",
+            endpoint="/api/admin/embeddings/missing",
+        )
+
+        data = response.json()
+        total_missing = data.get("total_missing", 0)
+        total_indexed = data.get("total_indexed", 0)
+        total_source = data.get("total_source", 0)
+
+        if getattr(args, "json", False):
+            print(json.dumps(data, indent=2))
+            return 0
+
+        print(f"\nEmbeddings Index Status:")
+        print(f"  Source documents:  {total_source}")
+        print(f"  Indexed:           {total_indexed}")
+        print(f"  Missing:           {total_missing}")
+
+        if total_missing == 0:
+            print("\n  All documents are indexed.")
+            return 0
+
+        print(f"\nMissing documents ({total_missing}):\n")
+        print(f"  {'Path':<50} {'Type':<15} {'Name'}")
+        print(f"  {'-'*50} {'-'*15} {'-'*30}")
+        for entry in data.get("missing", []):
+            print(
+                f"  {entry['path']:<50} {entry['entity_type']:<15} {entry['name']}"
+            )
+
+        return 0
+
+    except Exception as e:
+        logger.error(f"Embeddings missing check failed: {e}")
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_embeddings_reindex(args: argparse.Namespace) -> int:
+    """Re-index specific paths or all missing documents.
+
+    Args:
+        args: Parsed command line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    try:
+        client = _create_client(args)
+
+        paths = getattr(args, "paths", None)
+
+        if getattr(args, "all_missing", False):
+            response = client._make_request(
+                method="GET",
+                endpoint="/api/admin/embeddings/missing",
+            )
+            missing_data = response.json()
+            paths = [entry["path"] for entry in missing_data.get("missing", [])]
+            if not paths:
+                print("No missing embeddings found. Nothing to reindex.")
+                return 0
+            print(f"Found {len(paths)} missing documents. Reindexing...")
+
+        if not paths:
+            print("Error: provide --paths or --all-missing", file=sys.stderr)
+            return 1
+
+        batch_size = 100
+        total_success = 0
+        total_failed = 0
+
+        for i in range(0, len(paths), batch_size):
+            batch = paths[i : i + batch_size]
+            response = client._make_request(
+                method="POST",
+                endpoint="/api/admin/embeddings/reindex",
+                data={"paths": batch},
+            )
+            result = response.json()
+            total_success += result.get("success", 0)
+            total_failed += result.get("failed", 0)
+
+            if getattr(args, "json", False):
+                print(json.dumps(result, indent=2))
+            else:
+                print(
+                    f"  Batch {i // batch_size + 1}: "
+                    f"{result.get('success', 0)} success, "
+                    f"{result.get('failed', 0)} failed"
+                )
+
+                for detail in result.get("details", []):
+                    if detail.get("status") == "failed":
+                        print(
+                            f"    FAILED: {detail['path']} - {detail.get('error', 'unknown')}"
+                        )
+
+        print(f"\nReindex complete: {total_success} success, {total_failed} failed")
+        return 0 if total_failed == 0 else 1
+
+    except Exception as e:
+        logger.error(f"Embeddings reindex failed: {e}")
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     """
     Main entry point for the CLI.
@@ -6010,6 +6130,33 @@ Examples:
     # Application Log Commands (issue #886)
     # ==========================================
 
+    # Embeddings admin commands
+    embeddings_missing_parser = subparsers.add_parser(
+        "embeddings-missing",
+        help="Find documents missing from the search embeddings index (admin only)",
+    )
+    embeddings_missing_parser.add_argument(
+        "--json", action="store_true", help="Output raw JSON"
+    )
+
+    embeddings_reindex_parser = subparsers.add_parser(
+        "embeddings-reindex",
+        help="Re-index documents to generate search embeddings (admin only)",
+    )
+    embeddings_reindex_parser.add_argument(
+        "--paths",
+        nargs="+",
+        help="Specific paths to reindex (e.g. /cloudflare-docs /my-agent)",
+    )
+    embeddings_reindex_parser.add_argument(
+        "--all-missing",
+        action="store_true",
+        help="Reindex all documents missing from the embeddings index",
+    )
+    embeddings_reindex_parser.add_argument(
+        "--json", action="store_true", help="Output raw JSON per batch"
+    )
+
     logs_parser = subparsers.add_parser("logs", help="Query application logs (admin only)")
     logs_parser.add_argument("--service", help="Filter by service name")
     logs_parser.add_argument(
@@ -6152,6 +6299,9 @@ Examples:
         "telemetry-heartbeat": cmd_telemetry_heartbeat,
         "telemetry-startup": cmd_telemetry_startup,
         "logs": cmd_logs,
+        # Embeddings admin commands
+        "embeddings-missing": cmd_embeddings_missing,
+        "embeddings-reindex": cmd_embeddings_reindex,
     }
 
     handler = command_handlers.get(args.command)

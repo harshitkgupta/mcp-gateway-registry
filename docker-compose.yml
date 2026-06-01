@@ -559,6 +559,7 @@ services:
       - HOST=0.0.0.0
       - PORT=8003
       - REGISTRY_BASE_URL=http://registry:8080
+      - REGISTRY_EXTERNAL_URL=${REGISTRY_URL:-http://localhost}
       # Application file-log location (Issue #987) + format (json|text)
       - APP_LOG_DIR=${APP_LOG_DIR:-/var/log/containers/ai-registry}
       - APP_LOG_FILE_FORMAT=${APP_LOG_FILE_FORMAT:-json}
