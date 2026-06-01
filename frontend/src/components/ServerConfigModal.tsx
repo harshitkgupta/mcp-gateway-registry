@@ -575,13 +575,13 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
       }
     }
 
-    // Gateway auth header last
-    if (includeAuthHeaders) {
+    // Gateway auth header last (skip when DCR handles it automatically)
+    if (includeAuthHeaders && !isDCR) {
       command += ` \\\n  --header "X-Authorization: Bearer ${authToken}"`;
     }
 
     return command;
-  }, [server.name, server.path, server.proxy_pass_url, server.mcp_endpoint, server.auth_scheme, server.auth_header_name, isRegistryOnly, jwtToken, customHeaders]);
+  }, [server.name, server.path, server.proxy_pass_url, server.mcp_endpoint, server.auth_scheme, server.auth_header_name, isRegistryOnly, isDCR, jwtToken, customHeaders]);
 
 
   const copyConfigToClipboard = useCallback(async () => {
