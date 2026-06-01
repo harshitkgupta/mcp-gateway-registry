@@ -27,13 +27,15 @@ The registry implements hybrid search that combines semantic (vector) search wit
                     v                                   v
            +------------------+               +-------------------+
            |  Vector Search   |               |  Keyword Match    |
-           |  (Cosine Sim)    |               |  (Regex on path,  |
-           |                  |               |   name, desc,     |
-           |                  |               |   tags, metadata, |
-           |                  |               |   tools)          |
+           |  (per entity     |               |  (Regex on path,  |
+           |   type pipeline) |               |   name, desc,     |
+           |  servers: k=30   |               |   tags, metadata, |
+           |  agents:  k=30   |               |   tools)          |
+           |  skills:  k=30   |               |                   |
+           |  virtual: k=30   |               |                   |
            +--------+---------+               +---------+---------+
                     |                                   |
-                    | Ranked list #1                    | Ranked list #2
+                    | Merged ranked list                | Ranked list #2
                     | (by cosine sim)                   | (by text_boost)
                     |                                   |
                     +----------------+------------------+
@@ -488,8 +490,21 @@ For hybrid (vector + keyword) search, use `POST /api/search/semantic` instead.
 
 ### DocumentDB (Production)
 - Native HNSW vector index with `$search` aggregation pipeline
+- **Per-entity-type vector search**: Runs separate `$search vectorSearch` pipelines for each entity type (mcp_server, a2a_agent, skill, virtual_server) to ensure fair candidate representation. In large registries (1000+ documents), a single global search would be dominated by whichever entity type has the most documents, making agents and skills invisible.
+- Each per-type pipeline retrieves `k_per_type = max(max_results * 2, 30)` candidates, then all candidates are merged and deduplicated before RRF scoring
 - Keyword query runs separately and merges results (no `$unionWith` support)
 - Text boost calculated in aggregation pipeline using `$regexMatch`
+
+```
+Query: "flight booking"
+  Pipeline 1: $search vectorSearch (k=30) + $match entity_type=mcp_server  -> top 30 servers
+  Pipeline 2: $search vectorSearch (k=30) + $match entity_type=a2a_agent   -> top 30 agents
+  Pipeline 3: $search vectorSearch (k=30) + $match entity_type=skill       -> top 30 skills
+  Pipeline 4: $search vectorSearch (k=30) + $match entity_type=virtual_server -> top 30 virtual servers
+  Keyword:    collection.find({$or: [name/path/desc/tags/tools regex match]})
+  
+  All candidates merged -> RRF scoring -> _distribute_results -> normalize -> response
+```
 
 ### MongoDB CE (Development/Local)
 - No native vector search support (`$vectorSearch` not available)
