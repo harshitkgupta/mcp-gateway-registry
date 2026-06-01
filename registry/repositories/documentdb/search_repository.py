@@ -1403,7 +1403,7 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
                     "path": path,
                     "entity_type": "unknown",
                     "status": "failed",
-                    "error": str(e),
+                    "error": "Failed to re-index document due to an internal error",
                 })
 
         success_count = sum(1 for d in details if d["status"] == "success")
