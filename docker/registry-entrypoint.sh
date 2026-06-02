@@ -230,8 +230,10 @@ fi
 # the nginx counterpart to the app's BIND_HOST=:: support.
 if [ "${NGINX_ENABLE_IPV6:-false}" = "true" ]; then
     echo "NGINX_ENABLE_IPV6=true: adding IPv6 listen directives to nginx config..."
-    sed -i 's|listen 8080;|listen 8080;\n    listen [::]:8080;|' "$NGINX_CONFIG_PATH"
-    sed -i 's|listen 8443 ssl;|listen 8443 ssl;\n    listen [::]:8443 ssl;|' "$NGINX_CONFIG_PATH"
+    sed -i 's|listen 8080;|listen 8080;\
+    listen [::]:8080;|' "$NGINX_CONFIG_PATH"
+    sed -i 's|listen 8443 ssl;|listen 8443 ssl;\
+    listen [::]:8443 ssl;|' "$NGINX_CONFIG_PATH"
 fi
 
 # --- Embeddings Configuration ---
