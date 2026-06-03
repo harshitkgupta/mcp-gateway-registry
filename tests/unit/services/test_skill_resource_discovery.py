@@ -212,9 +212,11 @@ class TestDiscoverSkillResources:
             response = MagicMock()
             response.status_code = 200
             response.json = MagicMock()
-            # Real dict so the GitLab pagination loop sees no x-next-page header
-            # and terminates; a bare MagicMock would return a truthy sentinel
-            # and loop forever.
+            # Empty dict so the GitLab pagination loop never starts: a bare
+            # MagicMock would make .get("x-next-page", "") return a truthy
+            # sentinel, and because json() returns one shared list the loop's
+            # payload.extend(payload) would double the list every iteration and
+            # OOM the worker.
             response.headers = {}
 
             client_instance = MagicMock()

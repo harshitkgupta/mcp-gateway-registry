@@ -80,27 +80,7 @@ jobs:
 
     - name: Run all tests with coverage
       run: |
-        # Stream memory usage to the live step log every 2s. An OOM kill
-        # cancels the job (post-run artifact uploads never fire), so the log
-        # is the only place the pre-kill memory curve survives.
-        ( while true; do
-            mem=$(free -m | awk '/^Mem:/{printf "used=%sMB free=%sMB avail=%sMB", $3, $4, $7}')
-            top=$(ps -eo rss,comm --sort=-rss | awk 'NR>1 && NR<=4{printf " %s=%.0fMB", $2, $1/1024}')
-            echo "[MEM] $(date +%T) $mem | top:$top"
-            sleep 2
-          done ) &
-        MON_PID=$!
-
-        # -v streams each worker's test start/result so the last in-flight
-        # test per worker is visible if the runner dies. faulthandler dumps a
-        # traceback for any test that hangs longer than 120s.
-        set +e
-        PYTEST_ADDOPTS="-v -o faulthandler_timeout=120" \
-          uv run python scripts/test.py coverage -n 8
-        rc=$?
-        set -e
-        kill "$MON_PID" 2>/dev/null || true
-        exit $rc
+        uv run python scripts/test.py coverage -n 8
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5
