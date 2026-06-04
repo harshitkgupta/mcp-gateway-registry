@@ -171,6 +171,25 @@ def _validate_visibility_and_groups(
     return normalized, allowed_groups_list
 
 
+def _coerce_metadata_to_dict(parsed_metadata: Any, path: str) -> dict[str, Any]:
+    """Coerce parsed JSON metadata to a dict, with a warning on non-dict input.
+
+    ServerInfo.metadata is declared dict[str, Any]; arrays / scalars / None
+    all violate that invariant. PR #1175 fixed the None case for #1165; this
+    helper extends it to every non-dict shape so storage stays consistent
+    regardless of input. Non-dict input is silently coerced to {} (lenient,
+    matching the PR's intent) and logged so the coercion is observable.
+    """
+    if isinstance(parsed_metadata, dict):
+        return parsed_metadata
+    logger.warning(
+        "metadata for %s coerced to {}: expected JSON object, got %s",
+        path,
+        type(parsed_metadata).__name__,
+    )
+    return {}
+
+
 async def _build_versions_list(
     server_info: dict,
     current_version: str,
@@ -1198,7 +1217,7 @@ async def register_service(
             import json
 
             parsed_metadata = json.loads(metadata)
-            server_entry["metadata"] = parsed_metadata if parsed_metadata is not None else {}
+            server_entry["metadata"] = _coerce_metadata_to_dict(parsed_metadata, path)
         except json.JSONDecodeError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1497,7 +1516,7 @@ async def internal_register_service(
     if metadata:
         try:
             parsed_metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
-            server_entry["metadata"] = parsed_metadata if parsed_metadata is not None else {}
+            server_entry["metadata"] = _coerce_metadata_to_dict(parsed_metadata, path)
         except json.JSONDecodeError:
             return JSONResponse(
                 status_code=400,
@@ -3711,7 +3730,7 @@ async def register_service_api(
     if metadata:
         try:
             parsed_metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
-            server_entry["metadata"] = parsed_metadata if parsed_metadata is not None else {}
+            server_entry["metadata"] = _coerce_metadata_to_dict(parsed_metadata, path)
         except json.JSONDecodeError:
             return JSONResponse(
                 status_code=400,
@@ -5681,6 +5700,14 @@ async def get_server(
     # always persisted the field (#1181). Matches the default-on-read
     # pattern already used by agents, search, and federation responses.
     server_info.setdefault("visibility", "public")
+
+    # Normalize metadata for servers stored before the write-side fix
+    # always persisted the field (#1165). The list endpoint already does
+    # this via server_info.get("metadata", {}); mirror it here so the
+    # single-GET contract matches and clients never have to special-case
+    # absent vs empty.
+    if not isinstance(server_info.get("metadata"), dict):
+        server_info["metadata"] = {}
 
     return JSONResponse(
         status_code=200,
