@@ -245,6 +245,17 @@ Outputs:
 
 Embed the chart in the report's **Customer Infra Spend (AWS)** section. Include a single summary table that shows both numbers as a range (e.g. "yesterday: $292.67 – $346.01"), one short paragraph explaining the two counting rules, and the per-platform LTV breakdown (both models side by side). Flag clearly that the cost model is hypothetical (we don't actually bill these customers; these are "what it would cost them at list price").
 
+**ARR projection (mandatory):** below the cumulative LTV table, add a short subsection titled **"Annualized Run Rate (ARR) Projection"** that takes the 7-day daily-average spend and projects it forward 365 days. Compute as `last_7_days.<model>_total_usd / 7 * 365`, divided by 1,000,000, formatted to 2 decimal places in millions. Render BOTH models (proven and all-days) as a small two-row table:
+
+```
+| Model | 7-day daily avg | x 365 = ARR |
+|-------|----------------:|------------:|
+| Proven | $X | $Y.YYM |
+| All-days | $X | $Y.YYM |
+```
+
+Frame the ARR as "what the active customer fleet would cost AWS customers per year at list price if today's run rate held constant." Include the same hypothetical disclaimer (we do not bill these customers). The ARR is a useful complement to install-count growth: it tracks the real economic footprint of the customer fleet, not just the headcount of registry instances.
+
 ### Step 5d: Generate Install Forecast Chart
 
 Project when the registry will reach 1,000 installs using two models: a 14-day OLS linear regression and a 7-day recent-pace extrapolation. Produces a PNG chart (cumulative installs with forecast line and confidence bands) and a JSON summary with ETAs.
@@ -529,7 +540,10 @@ Table with both model ETAs (linear and recent-pace) and daily rates from `instal
 ## Customer Infra Spend (AWS)
 ![LTV Spend](ltv-spend-YYYY-MM-DD.png)
 
-Summary table from `ltv-spend-YYYY-MM-DD.json`. Show yesterday, last-7-days, and cumulative LTV as ranges. Per-platform LTV breakdown.
+Summary table from `ltv-spend-YYYY-MM-DD.json`. Show yesterday, last-7-days, 7-day daily average, and cumulative LTV as ranges. Per-platform LTV breakdown.
+
+### Annualized Run Rate (ARR) Projection
+Compute `7-day daily average * 365 / 1,000,000` for both proven and all-days models. Two-row table showing both ARRs in millions of dollars (formatted to 2 decimal places). Frame as: "what the active customer fleet would cost AWS customers per year at list price if today's run rate held constant." Include hypothetical disclaimer.
 
 ## Adoption Funnel
 ![Adoption Funnel](adoption-funnel-YYYY-MM-DD.png)
