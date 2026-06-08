@@ -372,13 +372,8 @@ Log: `{ 6, "Embeddings Model Download", DONE/FAILED, "~/mcp-gateway/models/all-M
 **Announce:** "Creating Docker volume mount directories..."
 
 ```bash
-# Splunk log directory (Issue #987). On Linux this exists by default
-# via the distro / log forwarder; on macOS we have to create it with
-# sudo since /var/log is root-owned.
-if [ ! -d /var/log/containers/ai-registry ]; then
-    sudo mkdir -p /var/log/containers/ai-registry
-    sudo chown "$(whoami)" /var/log/containers/ai-registry
-fi
+mkdir -p "${HOME}/mcp-gateway/{servers,models,auth_server,secrets/fininfo,logs,ssl}"
+ls -la "${HOME}/mcp-gateway/"
 ```
 
 Log: `{ 7, "Directory Creation", DONE, "~/mcp-gateway/{servers,models,auth_server,secrets/fininfo,logs,ssl}" }`
