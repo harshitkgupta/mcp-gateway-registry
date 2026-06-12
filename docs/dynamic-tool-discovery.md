@@ -6,6 +6,7 @@ The MCP Gateway & Registry provides a powerful **Dynamic Tool Discovery and Invo
 
 - [Overview](#overview)
 - [How It Works](#how-it-works)
+- [Discovery Receipts and Context Budgets](#discovery-receipts-and-context-budgets)
 - [Architecture](#architecture)
 - [Usage Examples](#usage-examples)
 - [Agent Integration](#agent-integration)
@@ -35,6 +36,63 @@ The dynamic tool discovery process follows these steps:
 5. **Tool Invocation**: Agent uses the discovered tool information to invoke the appropriate MCP tool
 
 ![Dynamic Tool Discovery Flow](img/dynamic-tool-discovery-demo.gif)
+
+## Discovery Receipts and Context Budgets
+
+Dynamic discovery reduces up-front context bloat, but eval harnesses and agent-development workflows still need to know which result surface an agent actually saw. The `search_registry` and deprecated `intelligent_tool_finder` tools can return a compact `discovery_receipt` when callers set `include_discovery_receipt=true`; the default response remains unchanged to avoid adding model-facing tokens in production calls.
+
+The receipt is a caller-visible eval/debugging signal, not an operator audit transport. If you need audit evidence for production traffic, emit it server-side through structured logs or OTel events/spans instead of relying on the model or caller to persist it.
+
+A useful receipt answers four questions:
+
+1. **What was requested?** The natural-language discovery query and correlation identifiers.
+2. **What was exposed?** The tools, agents, or skills returned to the agent, with scores and the configured result limits.
+3. **What stayed out?** The count or categories of candidate results that were intentionally withheld because they were outside the current intent, policy scope, or result budget.
+4. **What happened next?** Whether a discovered tool was invoked, skipped, denied, or fell back to another path.
+
+Example shape:
+
+```json
+{
+  "event": "registry.discovery_receipt",
+  "request_id": "req_123",
+  "session_id": "sess_456",
+  "query": "weather forecast for tomorrow",
+  "limits": {
+    "max_results": 1
+  },
+  "exposed_results": [
+    {
+      "asset_type": "tool",
+      "service_path": "/weather",
+      "name": "get_forecast",
+      "similarity_score": 0.91
+    }
+  ],
+  "withheld": {
+    "candidate_result_count": 42,
+    "reason": "outside_intent_or_budget"
+  },
+  "invocation": {
+    "tool_name": "get_forecast",
+    "status": "ok",
+    "args_shape": {
+      "fields": ["location", "days"],
+      "redacted": true
+    },
+    "result_shape": "forecast",
+    "duration_ms": 245
+  },
+  "stop_reason": "tool_invoked"
+}
+```
+
+Keep discovery receipts compact and privacy-safe:
+
+- Store shapes, counts, categories, scores, and correlation IDs; avoid raw user prompts beyond the discovery query unless your retention policy allows them.
+- Redact tool arguments and results by default. The receipt should show the class of data used, not copy sensitive payloads into observability storage.
+- Keep metrics lower-cardinality than receipts. Good metric labels include service family, status, and stop reason; avoid labels such as raw query text, user IDs, arguments, or result values.
+- Treat withheld results as a first-class signal. If many useful tools, agents, or skills are repeatedly withheld for the same task, split services, improve descriptions, or adjust discovery limits.
 
 ## Architecture
 

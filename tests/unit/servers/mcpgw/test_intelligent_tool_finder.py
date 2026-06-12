@@ -31,7 +31,12 @@ _mcpgw_path = str(Path(__file__).resolve().parents[4] / "servers" / "mcpgw")
 if _mcpgw_path not in sys.path:
     sys.path.insert(0, _mcpgw_path)
 
-from servers.mcpgw.server import _validate_top_n, intelligent_tool_finder
+from servers.mcpgw.server import (
+    _build_discovery_receipt,
+    _validate_top_n,
+    intelligent_tool_finder,
+    search_registry,
+)
 
 
 def _make_mock_response(servers=None, status_code=200):
@@ -59,22 +64,12 @@ def _make_server_with_tools(n_tools, server_name="test-server", path="/test"):
     }
 
 
-async def _call_finder(mock_response, query="test", top_n=None, capture=None):
-    """Helper to call intelligent_tool_finder with mocked HTTP client and token.
-
-    Args:
-        mock_response: The mock httpx response to return from POST.
-        query: Search query string.
-        top_n: Number of results (omit to use default).
-        capture: If provided, a dict that will be populated with the POST kwargs.
-
-    Returns:
-        The result dict from intelligent_tool_finder.
-    """
+async def _call_with_mocked_registry(tool_func, mock_response, capture=None, **kwargs):
+    """Call a registry search tool with mocked HTTP client and token."""
     captured_kwargs = {}
 
-    async def mock_post(url, **kwargs):
-        captured_kwargs.update(kwargs)
+    async def mock_post(url, **post_kwargs):
+        captured_kwargs.update(post_kwargs)
         return mock_response
 
     mock_client = AsyncMock()
@@ -86,15 +81,61 @@ async def _call_finder(mock_response, query="test", top_n=None, capture=None):
         patch("servers.mcpgw.server.httpx.AsyncClient", return_value=mock_client),
         patch("servers.mcpgw.server._extract_bearer_token", return_value="test-token"),
     ):
-        if top_n is not None:
-            result = await intelligent_tool_finder(query=query, top_n=top_n)
-        else:
-            result = await intelligent_tool_finder(query=query)
+        result = await tool_func(**kwargs)
 
     if capture is not None:
         capture.update(captured_kwargs)
 
     return result
+
+
+async def _call_finder(
+    mock_response,
+    query="test",
+    top_n=None,
+    capture=None,
+    include_discovery_receipt=False,
+):
+    """Helper to call intelligent_tool_finder with mocked HTTP client and token.
+
+    Args:
+        mock_response: The mock httpx response to return from POST.
+        query: Search query string.
+        top_n: Number of results (omit to use default).
+        capture: If provided, a dict that will be populated with the POST kwargs.
+
+    Returns:
+        The result dict from intelligent_tool_finder.
+    """
+    kwargs = {"query": query}
+    if top_n is not None:
+        kwargs["top_n"] = top_n
+    if include_discovery_receipt:
+        kwargs["include_discovery_receipt"] = True
+    return await _call_with_mocked_registry(
+        intelligent_tool_finder,
+        mock_response,
+        capture=capture,
+        **kwargs,
+    )
+
+
+async def _call_search_registry(
+    mock_response,
+    query="test",
+    max_results=10,
+    capture=None,
+    include_discovery_receipt=False,
+):
+    """Helper to call search_registry with mocked HTTP client and token."""
+    return await _call_with_mocked_registry(
+        search_registry,
+        mock_response,
+        capture=capture,
+        query=query,
+        max_results=max_results,
+        include_discovery_receipt=include_discovery_receipt,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -222,3 +263,177 @@ async def test_total_results_matches_truncated_list():
 
     assert result["total_results"] == len(result["results"])
     assert result["total_results"] == 5
+
+
+# ---------------------------------------------------------------------------
+# test_discovery_receipt_records_exposed_and_withheld_tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discovery_receipt_records_exposed_and_withheld_tools():
+    """Opt-in receipt shows visible results and candidates kept out by top_n."""
+    server = _make_server_with_tools(4, server_name="server-a", path="/a")
+    mock_resp = _make_mock_response(servers=[server])
+
+    result = await _call_finder(
+        mock_resp,
+        query="weather lookup",
+        top_n=2,
+        include_discovery_receipt=True,
+    )
+
+    receipt = result["discovery_receipt"]
+    assert receipt["event"] == "registry.discovery_receipt"
+    assert receipt["query"] == "weather lookup"
+    assert receipt["limits"] == {"max_results": 2}
+    assert receipt["exposed_results"] == [
+        {"asset_type": "tool", "service_path": "/a", "name": "tool_0", "similarity_score": 1.0},
+        {"asset_type": "tool", "service_path": "/a", "name": "tool_1", "similarity_score": 0.95},
+    ]
+    assert receipt["withheld"] == {
+        "candidate_result_count": 2,
+        "reason": "outside_intent_or_budget",
+    }
+    assert receipt["stop_reason"] == "results_returned"
+
+
+# ---------------------------------------------------------------------------
+# test_discovery_receipt_is_opt_in
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discovery_receipt_is_opt_in():
+    """Default responses stay backward-compatible without receipt tokens."""
+    server = _make_server_with_tools(1)
+    mock_resp = _make_mock_response(servers=[server])
+
+    finder_result = await _call_finder(mock_resp, top_n=1)
+    assert "discovery_receipt" not in finder_result
+
+    search_result = await _call_search_registry(mock_resp, max_results=1)
+    assert "discovery_receipt" not in search_result
+
+
+# ---------------------------------------------------------------------------
+# test_search_registry_receipt_counts_withheld_matching_tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_registry_receipt_counts_withheld_matching_tools():
+    """search_registry receipt counts all matching tools, not just servers."""
+    server = _make_server_with_tools(4, server_name="server-a", path="/a")
+    mock_resp = _make_mock_response(servers=[server])
+
+    result = await _call_search_registry(
+        mock_resp,
+        query="weather lookup",
+        max_results=2,
+        include_discovery_receipt=True,
+    )
+
+    receipt = result["discovery_receipt"]
+    assert result["total_results"] == 1
+    assert receipt["exposed_results"] == [
+        {"asset_type": "tool", "service_path": "/a", "name": "tool_0", "similarity_score": 1.0},
+        {"asset_type": "tool", "service_path": "/a", "name": "tool_1", "similarity_score": 0.95},
+    ]
+    assert receipt["withheld"] == {
+        "candidate_result_count": 2,
+        "reason": "outside_intent_or_budget",
+    }
+
+
+# ---------------------------------------------------------------------------
+# test_search_registry_receipt_counts_top_level_tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_registry_receipt_counts_top_level_tools():
+    """search_registry receipt also handles top-level tool search results."""
+    mock_resp = _make_mock_response()
+    mock_resp.json.return_value = {
+        "servers": [],
+        "tools": [
+            {"server_path": "/a", "tool_name": "tool_0", "relevance_score": 1.0},
+            {"server_path": "/a", "tool_name": "tool_1", "relevance_score": 0.95},
+            {"server_path": "/b", "tool_name": "tool_2", "relevance_score": 0.9},
+        ],
+        "agents": [],
+        "skills": [],
+    }
+
+    result = await _call_search_registry(
+        mock_resp,
+        query="weather lookup",
+        max_results=2,
+        include_discovery_receipt=True,
+    )
+
+    receipt = result["discovery_receipt"]
+    assert result["total_results"] == 3
+    assert len(receipt["exposed_results"]) == 2
+    assert receipt["withheld"]["candidate_result_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# test_search_registry_receipt_counts_agents_and_skills
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_registry_receipt_counts_agents_and_skills():
+    """search_registry receipt accounts for agents and skills, not just tools."""
+    mock_resp = _make_mock_response()
+    mock_resp.json.return_value = {
+        "servers": [],
+        "tools": [{"server_path": "/a", "tool_name": "tool_0", "relevance_score": 1.0}],
+        "agents": [{"path": "/agent", "agent_name": "agent_0", "relevance_score": 0.9}],
+        "skills": [{"path": "/skill", "skill_name": "skill_0", "relevance_score": 0.8}],
+    }
+
+    result = await _call_search_registry(
+        mock_resp,
+        query="weather lookup",
+        max_results=2,
+        include_discovery_receipt=True,
+    )
+
+    receipt = result["discovery_receipt"]
+    assert result["total_results"] == 3
+    assert receipt["exposed_results"] == [
+        {"asset_type": "tool", "service_path": "/a", "name": "tool_0", "similarity_score": 1.0},
+        {"asset_type": "agent", "service_path": "/agent", "name": "agent_0", "similarity_score": 0.9},
+    ]
+    assert receipt["withheld"]["candidate_result_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# test_discovery_receipt_helper_does_not_leak_payloads
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_receipt_helper_does_not_leak_payloads():
+    """Helper keeps receipts to query, counts, limits, scores, and status fields."""
+    receipt = _build_discovery_receipt(
+        query="find private customer records",
+        limit=1,
+        exposed_results=[
+            {
+                "asset_type": "tool",
+                "service_path": "/crm",
+                "name": "search_customers",
+                "similarity_score": 0.9,
+            }
+        ],
+        total_candidates=3,
+        status="success",
+        stop_reason="results_returned",
+    )
+
+    assert "raw_args" not in receipt
+    assert "raw_result" not in receipt
+    assert receipt["withheld"]["candidate_result_count"] == 2
