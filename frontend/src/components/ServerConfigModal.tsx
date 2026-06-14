@@ -84,6 +84,11 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
   // advertises it and drops the static gateway token so the IDE shows a login
   // button and runs the OAuth/PKCE flow instead of pasting a token.
   const [oauthClientId, setOauthClientId] = useState<string>('');
+  // Fixed loopback callback port for OAuth login. 0/null = let the IDE pick one
+  // (fine for Keycloak's wildcard redirect). For IdPs that match redirect_uri
+  // literally (Okta/Entra/Cognito), the operator sets a fixed port and we emit
+  // --callback-port so the IDE does not use a random port the IdP rejects.
+  const [oauthCallbackPort, setOauthCallbackPort] = useState<number | null>(null);
   // Per-server override for the trailing '/mcp' transport segment on the gateway
   // URL. null = auto-detect from proxy_pass_url.
   const [appendMcpPath, setAppendMcpPath] = useState<boolean | null>(null);
@@ -108,6 +113,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     setConnectConfigError(null);
     setCustomHeaders([]);
     setOauthClientId('');
+    setOauthCallbackPort(null);
     setAppendMcpPath(null);
     const serverPath = server.path.replace(/^\/+/, '');
     // Fetch CSRF token first, then include it as header for the GET request
@@ -125,6 +131,9 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
       .then(resp => {
         setCustomHeaders(resp.data.custom_headers ?? []);
         setOauthClientId(resp.data.oauth_client_id ?? '');
+        setOauthCallbackPort(
+          typeof resp.data.oauth_callback_port === 'number' ? resp.data.oauth_callback_port : null
+        );
         setAppendMcpPath(
           typeof resp.data.append_mcp_path === 'boolean' ? resp.data.append_mcp_path : null
         );
@@ -136,10 +145,23 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
       })
       .catch((err) => {
         console.error("Failed to fetch connect config", err);
-        setConnectConfigError(
-          "Could not load custom headers for this server. " +
-          "The copied configuration may be missing headers your server requires."
-        );
+        // A 403 here is almost always a stale CSRF/session after a redeploy.
+        // Surface an actionable message rather than silently falling back to
+        // the static-token config (which hides that OAuth login was configured).
+        const status = err?.response?.status;
+        if (status === 403) {
+          setConnectConfigError(
+            "Could not load connect configuration (403): your session may be stale. " +
+            "Log out and back in, then reopen this dialog. The configuration shown " +
+            "below is a fallback and may omit OAuth login or required headers."
+          );
+        } else {
+          setConnectConfigError(
+            "Could not load connect configuration for this server. " +
+            "The configuration shown below is a fallback and may omit OAuth login " +
+            "or headers your server requires."
+          );
+        }
       });
   }, [isOpen, server.path]);
 
@@ -329,7 +351,9 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     switch (selectedIDE) {
       case 'cursor': {
         // OAuth login mode: advertise the pre-registered client_id and omit the
-        // gateway token so Cursor renders a login button (auth.CLIENT_ID).
+        // gateway token so Cursor renders a login button. The `auth.CLIENT_ID`
+        // key (upper-snake) is Cursor's documented MCP OAuth config shape; it
+        // intentionally differs from the lowercase keys elsewhere in this file.
         if (useOAuthLogin) {
           const oauthHeaders = buildHeaders(false);
           return {
@@ -355,6 +379,10 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
           },
         };
       }
+      // The IDEs below intentionally do NOT emit the OAuth-login (client_id)
+      // config even when useOAuthLogin is true: they have no verified
+      // fixed-public-client OAuth config syntax, so they keep the static-token
+      // behavior. Only Cursor / Claude Code / Codex support the login config.
       case 'roo-code':
         return {
           mcpServers: {
@@ -553,9 +581,15 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
 
     // Build command with headers. OAuth login mode passes the pre-registered
     // public client id (--client-id) so Claude Code runs OAuth/PKCE; no token.
+    // A configured callback port is emitted as --callback-port so the IDE uses a
+    // fixed loopback port (required for Okta/Entra/Cognito, which match the
+    // redirect_uri literally including the port).
     let command = `claude mcp add --transport http`;
     if (useOAuthLogin) {
       command += ` --client-id ${oauthClientId}`;
+      if (oauthCallbackPort) {
+        command += ` --callback-port ${oauthCallbackPort}`;
+      }
     }
     command += ` ${serverName} ${url}`;
 
@@ -580,7 +614,7 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
     }
 
     return command;
-  }, [server.name, server.auth_scheme, server.auth_header_name, isRegistryOnly, isDCR, useOAuthLogin, oauthClientId, jwtToken, customHeaders, buildConnectUrl]);
+  }, [server.name, server.auth_scheme, server.auth_header_name, isRegistryOnly, isDCR, useOAuthLogin, oauthClientId, oauthCallbackPort, jwtToken, customHeaders, buildConnectUrl]);
 
 
   const copyConfigToClipboard = useCallback(async () => {
@@ -681,6 +715,15 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
               <li>Restart your AI coding assistant to load the new configuration</li>
             </ol>
           </div>
+
+          {connectConfigError && (
+            <div
+              role="alert"
+              className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800 rounded-lg p-4"
+            >
+              <p className="text-sm text-amber-800 dark:text-amber-200">{connectConfigError}</p>
+            </div>
+          )}
 
           {isLocal ? (
             <div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg p-4">
@@ -826,6 +869,8 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
                 Run this command in your terminal to add the MCP server to Claude Code.
                 {useOAuthLogin && ' It passes the pre-registered public client id (--client-id) ' +
                   'so Claude Code runs the OAuth login flow — no gateway token is embedded.'}
+                {useOAuthLogin && oauthCallbackPort ? ' --callback-port pins the OAuth redirect ' +
+                  'port so it matches what the identity provider has registered.' : ''}
               </p>
             </div>
           ) : selectedIDE === 'codex' ? (
@@ -839,6 +884,14 @@ const ServerConfigModal: React.FC<ServerConfigModalProps> = ({
                       'so Codex runs the OAuth login flow — no gateway token is embedded.'
                     : isDCR && ' OAuth authentication is handled automatically via DCR.'}
                 </p>
+                {useOAuthLogin && oauthCallbackPort ? (
+                  <p className="text-xs text-amber-800 dark:text-amber-300 mt-2">
+                    Note: Codex does not support pinning the OAuth callback port, so it uses a
+                    random loopback port. If your identity provider requires the redirect URI
+                    (including the port) to be pre-registered (e.g. Okta, Entra, Cognito), Codex
+                    login may fail. Claude Code supports a fixed port via --callback-port.
+                  </p>
+                ) : null}
               </div>
               <div className="flex items-center justify-between">
                 <h4 className="font-medium text-gray-900 dark:text-white">Command:</h4>

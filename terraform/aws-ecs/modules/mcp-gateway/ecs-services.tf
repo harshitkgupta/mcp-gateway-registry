@@ -140,6 +140,12 @@ module "ecs_service_auth" {
           name  = "COGNITO_DOMAIN"
           value = var.cognito_domain
         },
+        # IDE OAuth login public client_id (PR #1224). The auth-server accepts
+        # access tokens from this client (e.g. Cognito allowlist). Not a secret.
+        {
+          name  = "IDE_OAUTH_CLIENT_ID"
+          value = var.ide_oauth_client_id
+        },
         {
           name  = "KEYCLOAK_URL"
           value = var.keycloak_domain != "" ? "https://${var.keycloak_domain}" : ""
@@ -1188,6 +1194,18 @@ module "ecs_service_registry" {
         {
           name  = "MCP_ADVERTISED_SCOPES"
           value = var.mcp_advertised_scopes
+        },
+        # Public OAuth client_id advertised in Connect configs for IDE login
+        # (PR #1224). Public, not a secret; empty = static-token Connect config.
+        {
+          name  = "IDE_OAUTH_CLIENT_ID"
+          value = var.ide_oauth_client_id
+        },
+        # Fixed OAuth callback port for IdPs that match redirect_uri literally
+        # (Okta/Entra/Cognito). 0 = let the IDE pick (Keycloak/DCR).
+        {
+          name  = "IDE_OAUTH_CALLBACK_PORT"
+          value = tostring(var.ide_oauth_callback_port)
         },
         {
           name  = "DEPLOYMENT_MODE"
