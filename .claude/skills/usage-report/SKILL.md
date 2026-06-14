@@ -363,20 +363,47 @@ Embed the chart in a section titled "Cloud Detection Outcomes by Version" placed
 
 Collect community-growth signals for the upstream repo (`agentic-community/mcp-gateway-registry`) using the authenticated `gh` CLI. These numbers complement telemetry by showing project interest outside of deployed instances.
 
-```bash
-# Star, fork, watcher, open-issue counts (single API call)
-gh api repos/agentic-community/mcp-gateway-registry \
-  --jq '{stars: .stargazers_count, forks: .forks_count, watchers: .subscribers_count, open_issues: .open_issues_count}' \
-  > $DATE_DIR/github_stats.json
+Run the helper script with the dated output directory as its only argument. It
+writes `github_stats.json` and `github_contributors_count.txt` into that
+directory and prints both for confirmation. Keep this as a single script call
+(do NOT inline the `gh api` pipelines into a larger `&&` chain): one script
+invocation is one allow-listed command, so it runs without a permission prompt
+on every report date.
 
-# Unique contributors (paginate through all pages, count unique logins)
-gh api --paginate repos/agentic-community/mcp-gateway-registry/contributors \
-  --jq '.[].login' | sort -u | wc -l > $DATE_DIR/github_contributors_count.txt
+```bash
+.claude/skills/usage-report/fetch_github_stats.sh $DATE_DIR
 ```
 
 Record these numbers in the report and compare them against the previous report's `github_stats.json` (if present in the previous dated subfolder). Compute deltas for stars, forks, and contributors the same way telemetry metrics are compared.
 
-**Note**: If `gh` is not authenticated or the API call fails, skip the GitHub section in the report and log a short note instead of failing the entire run.
+**Note**: If `gh` is not authenticated or an API call fails, the script logs a short note and exits 0 (the file is omitted). Skip the GitHub section in the report in that case instead of failing the entire run.
+
+### Step 5h: Generate Community-vs-Internal Chart and Breakdown
+
+Classify every registry instance as a **community** deployment or an **internal/development** deployment based on its reported version string, then produce a timeseries chart and a breakdown summary. This scans all CSV files across dated subdirectories like the other historical charts.
+
+Classification rule:
+- **Community**: a clean release tag matching `^v?MAJOR.MINOR.PATCH(-pN)?$` (e.g. `1.0.0`, `1.24.4`, `v1.0.20`, `v1.0.22-p1`).
+- **Internal**: anything else (git-describe builds like `1.24.1-25-g5b4b2a30-main`, bare commit hashes like `f3d77e3`, `dev`, `sha-...`, branch-suffixed builds). Instances in the known-internal allowlist are always counted as internal.
+- **Unknown**: an empty version string.
+
+Each instance is attributed to the **latest** version it reported. Pass `--yesterday` as the previous complete day (YYYY-MM-DD - 1) so the headline breakdown reflects the last full day, and `--exclude-incomplete-day` as today's date so the chart series don't show a misleading trailing dip.
+
+```bash
+/usr/bin/python3 .claude/skills/usage-report/generate_prod_internal_chart.py \
+  --csv-dir OUTPUT_DIR \
+  --output $DATE_DIR/prod-internal-timeseries-YYYY-MM-DD.png \
+  --summary-json $DATE_DIR/prod-internal-YYYY-MM-DD.json \
+  --internal-instances .claude/skills/usage-report/known-internal-instances.md \
+  --yesterday PREVIOUS-YYYY-MM-DD \
+  --exclude-incomplete-day YYYY-MM-DD
+```
+
+Outputs:
+- A PNG with two panels: cumulative unique installs (community vs internal) and daily active installs (community vs internal) over time.
+- A JSON summary with `yesterday` (per-class active counts for the last complete day), `cumulative` (all-time per-class counts), `per_version` (cumulative unique instances per version within each class), and `timeseries` (per-day community/internal counts).
+
+The renderer reads this JSON to populate the "Community vs Internal Deployments" section: the yesterday/cumulative headline numbers and the two per-version breakdown tables. Embed the chart in that section.
 
 ### Step 6: Run Telemetry Analysis
 
@@ -512,7 +539,7 @@ The renderer is composed of three pieces, all under `.claude/skills/usage-report
 
 #### Mandatory Charts Checklist
 
-The report MUST embed all 12 charts (the template's `![...]` references). If any chart file is missing the renderer will substitute the path verbatim and pandoc will render a broken-image placeholder, so generate all charts (Steps 5 through 5f) before invoking `render_report.py`.
+The report MUST embed all 13 charts (the template's `![...]` references). If any chart file is missing the renderer will substitute the path verbatim and pandoc will render a broken-image placeholder, so generate all charts (Steps 5 through 5h) before invoking `render_report.py`.
 
 1. `registry-installs-timeseries-YYYY-MM-DD.png` (cloud provider: cumulative + daily-active + daily-new)
 2. `instance-distribution-YYYY-MM-DD.png` (6-panel faceted, all customers)
@@ -526,6 +553,7 @@ The report MUST embed all 12 charts (the template's `![...]` references). If any
 10. `ltv-spend-YYYY-MM-DD.png` (daily compute + bedrock + cumulative)
 11. `adoption-funnel-YYYY-MM-DD.png` (funnel from total to confirmed-alive)
 12. `detection-by-version-YYYY-MM-DD.png` (cloud_detection_method outcomes per version)
+13. `prod-internal-timeseries-YYYY-MM-DD.png` (community vs internal: cumulative + daily-active)
 
 #### Editing the report
 
@@ -575,7 +603,7 @@ The pipeline is split so the LLM has a narrowly-scoped, hard-to-screw-up job:
 
 #### Required commentary anchors (in template)
 
-The current template has 20 commentary anchors covering: executive_summary, cloud_installs, deployment_distribution, lifetime_retention, liveness, engagement, compute_platform, version_adoption, upgrade_trajectories, feature_adoption, sticky_breakdown, most_active, install_forecast, daily_reporters, ltv_arr, adoption_funnel, cloud_detection, github, architecture, recommendations.
+The current template has 21 commentary anchors covering: executive_summary, cloud_installs, deployment_distribution, lifetime_retention, liveness, engagement, compute_platform, version_adoption, prod_internal, upgrade_trajectories, feature_adoption, sticky_breakdown, most_active, install_forecast, daily_reporters, ltv_arr, adoption_funnel, cloud_detection, github, architecture, recommendations.
 
 Adding/removing anchors: edit `report_template.md` to insert or delete `<!-- COMMENTARY:name -->` markers; the augmenter's extract phase will pick up the new set automatically.
 
