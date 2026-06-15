@@ -25,6 +25,7 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { RegistryConfig } from '../registry-config';
+import { putSecureSsmParam } from './_lib';
 
 // ---------------------------------------------------------------------------
 // Construct props
@@ -189,57 +190,8 @@ export class KeycloakService extends Construct {
     // The database SSM parameters are created by the data stack.
     // ------------------------------------------------------------------
 
-    // SSM SecureString requires AwsCustomResource (CFN does not support SecureString)
-    const ssmPutPolicy = new iam.PolicyStatement({
-      actions: ['ssm:PutParameter', 'ssm:DeleteParameter', 'ssm:AddTagsToResource'],
-      resources: [
-        cdk.Stack.of(this).formatArn({ service: 'ssm', resource: 'parameter', resourceName: 'keycloak/*' }),
-      ],
-    });
-    const ssmKmsPolicy = new iam.PolicyStatement({
-      actions: ['kms:Encrypt', 'kms:GenerateDataKey'],
-      resources: [rdsKmsKey.keyArn],
-    });
-
-    const keycloakSsmParams: Array<{ id: string; name: string; value: string }> = [
-      { id: 'SsmKeycloakAdmin', name: '/keycloak/admin', value: config.keycloak.adminUser },
-      { id: 'SsmKeycloakAdminPassword', name: '/keycloak/admin_password', value: config.keycloak.adminPassword },
-    ];
-
-    for (const param of keycloakSsmParams) {
-      new cr.AwsCustomResource(this, param.id, {
-        onCreate: {
-          service: 'SSM',
-          action: 'putParameter',
-          parameters: {
-            Name: param.name,
-            Type: 'SecureString',
-            KeyId: rdsKmsKey.keyId,
-            Value: param.value,
-            Overwrite: true,
-          },
-          physicalResourceId: cr.PhysicalResourceId.of(param.name),
-        },
-        onUpdate: {
-          service: 'SSM',
-          action: 'putParameter',
-          parameters: {
-            Name: param.name,
-            Type: 'SecureString',
-            KeyId: rdsKmsKey.keyId,
-            Value: param.value,
-            Overwrite: true,
-          },
-          physicalResourceId: cr.PhysicalResourceId.of(param.name),
-        },
-        onDelete: {
-          service: 'SSM',
-          action: 'deleteParameter',
-          parameters: { Name: param.name },
-        },
-        policy: cr.AwsCustomResourcePolicy.fromStatements([ssmPutPolicy, ssmKmsPolicy]),
-      });
-    }
+    putSecureSsmParam(this, 'SsmKeycloakAdmin', '/keycloak/admin', config.keycloak.adminUser, rdsKmsKey);
+    putSecureSsmParam(this, 'SsmKeycloakAdminPassword', '/keycloak/admin_password', config.keycloak.adminPassword, rdsKmsKey);
 
     // Build ARNs for Keycloak SSM parameters (admin creds + DB URL)
     // DB username/password now come from Secrets Manager (rotation-safe)
@@ -349,22 +301,10 @@ export class KeycloakService extends Construct {
 
     // --- ALB SG Rules ---
 
-    // ALB ingress: HTTP from allowed CIDR blocks
     for (const cidr of config.ingressCidrBlocks) {
-      this.albSg.addIngressRule(
-        ec2.Peer.ipv4(cidr),
-        ec2.Port.tcp(80),
-        'Ingress from allowed CIDR blocks to load balancer (HTTP)',
-      );
-    }
-
-    // ALB ingress: HTTPS from allowed CIDR blocks
-    for (const cidr of config.ingressCidrBlocks) {
-      this.albSg.addIngressRule(
-        ec2.Peer.ipv4(cidr),
-        ec2.Port.tcp(443),
-        'Ingress from allowed CIDR blocks to load balancer (HTTPS)',
-      );
+      for (const port of [80, 443]) {
+        this.albSg.addIngressRule(ec2.Peer.ipv4(cidr), ec2.Port.tcp(port), `Ingress from ${cidr}`);
+      }
     }
 
     // ALB egress: port 8080 to ECS SG (application traffic)

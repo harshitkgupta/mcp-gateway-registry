@@ -614,35 +614,39 @@ function _deepMerge(target: Record<string, any>, source: Record<string, any>): R
 // Helper: inject sensitive values from environment variables
 // ---------------------------------------------------------------------------
 
-function _injectSecrets(config: RegistryConfig): void {
-  const envMap: Array<[string, (cfg: RegistryConfig, val: string) => void]> = [
-    ['CDK_KEYCLOAK_ADMIN_PASSWORD', (c, v) => { c.keycloak.adminPassword = v; }],
-    ['CDK_KEYCLOAK_DATABASE_PASSWORD', (c, v) => { c.keycloak.databasePassword = v; }],
-    ['CDK_DOCUMENTDB_ADMIN_PASSWORD', (c, v) => { c.documentdb.adminPassword = v; }],
-    ['CDK_EMBEDDINGS_API_KEY', (c, v) => { c.embeddings.apiKey = v; }],
-    ['CDK_ENTRA_CLIENT_SECRET', (c, v) => { c.entra.clientSecret = v; }],
-    ['CDK_OKTA_CLIENT_SECRET', (c, v) => { c.okta.clientSecret = v; }],
-    ['CDK_OKTA_M2M_CLIENT_SECRET', (c, v) => { c.okta.m2mClientSecret = v; }],
-    ['CDK_OKTA_API_TOKEN', (c, v) => { c.okta.apiToken = v; }],
-    ['CDK_AUTH0_CLIENT_SECRET', (c, v) => { c.auth0.clientSecret = v; }],
-    ['CDK_AUTH0_M2M_CLIENT_SECRET', (c, v) => { c.auth0.m2mClientSecret = v; }],
-    ['CDK_AUTH0_MANAGEMENT_API_TOKEN', (c, v) => { c.auth0.managementApiToken = v; }],
-    ['CDK_REGISTRY_API_TOKEN', (c, v) => { c.staticTokenAuth.registryApiToken = v; }],
-    ['CDK_FEDERATION_STATIC_TOKEN', (c, v) => { c.federation.staticToken = v; }],
-    ['CDK_FEDERATION_ENCRYPTION_KEY', (c, v) => { c.federation.encryptionKey = v; }],
-    ['CDK_ANS_API_KEY', (c, v) => { c.ans.apiKey = v; }],
-    ['CDK_ANS_API_SECRET', (c, v) => { c.ans.apiSecret = v; }],
-    ['CDK_GITHUB_PAT', (c, v) => { c.github.pat = v; }],
-    ['CDK_GITHUB_APP_PRIVATE_KEY', (c, v) => { c.github.appPrivateKey = v; }],
-    ['CDK_GRAFANA_ADMIN_PASSWORD', (c, v) => { c.grafanaAdminPassword = v; }],
-    ['CDK_OTEL_EXPORTER_OTLP_HEADERS', (c, v) => { c.otel.exporterOtlpHeaders = v; }],
-  ];
+// Map of env var name to dotted path within RegistryConfig.
+const SECRET_ENV_PATHS: Record<string, string> = {
+  CDK_KEYCLOAK_ADMIN_PASSWORD: 'keycloak.adminPassword',
+  CDK_KEYCLOAK_DATABASE_PASSWORD: 'keycloak.databasePassword',
+  CDK_DOCUMENTDB_ADMIN_PASSWORD: 'documentdb.adminPassword',
+  CDK_EMBEDDINGS_API_KEY: 'embeddings.apiKey',
+  CDK_ENTRA_CLIENT_SECRET: 'entra.clientSecret',
+  CDK_OKTA_CLIENT_SECRET: 'okta.clientSecret',
+  CDK_OKTA_M2M_CLIENT_SECRET: 'okta.m2mClientSecret',
+  CDK_OKTA_API_TOKEN: 'okta.apiToken',
+  CDK_AUTH0_CLIENT_SECRET: 'auth0.clientSecret',
+  CDK_AUTH0_M2M_CLIENT_SECRET: 'auth0.m2mClientSecret',
+  CDK_AUTH0_MANAGEMENT_API_TOKEN: 'auth0.managementApiToken',
+  CDK_REGISTRY_API_TOKEN: 'staticTokenAuth.registryApiToken',
+  CDK_FEDERATION_STATIC_TOKEN: 'federation.staticToken',
+  CDK_FEDERATION_ENCRYPTION_KEY: 'federation.encryptionKey',
+  CDK_ANS_API_KEY: 'ans.apiKey',
+  CDK_ANS_API_SECRET: 'ans.apiSecret',
+  CDK_GITHUB_PAT: 'github.pat',
+  CDK_GITHUB_APP_PRIVATE_KEY: 'github.appPrivateKey',
+  CDK_GRAFANA_ADMIN_PASSWORD: 'grafanaAdminPassword',
+  CDK_OTEL_EXPORTER_OTLP_HEADERS: 'otel.exporterOtlpHeaders',
+};
 
-  for (const [envVar, setter] of envMap) {
+function _injectSecrets(config: RegistryConfig): void {
+  for (const [envVar, dottedPath] of Object.entries(SECRET_ENV_PATHS)) {
     const value = process.env[envVar];
-    if (value) {
-      setter(config, value);
-    }
+    if (!value) continue;
+    const keys = dottedPath.split('.');
+    const last = keys.pop()!;
+    let target: any = config;
+    for (const k of keys) target = target[k];
+    target[last] = value;
   }
 }
 

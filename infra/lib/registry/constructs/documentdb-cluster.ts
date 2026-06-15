@@ -15,9 +15,9 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 import { RegistryConfig } from '../registry-config';
+import { putSecureSsmParam } from './_lib';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -271,7 +271,6 @@ export class DocumentDbCluster extends Construct {
       stringValue: this.readerEndpoint,
     });
 
-    // SSM SecureString requires L1 CfnParameter (L2 does not support SecureString)
     const connectionString = cdk.Fn.join('', [
       'mongodb://',
       config.documentdb.adminUsername,
@@ -283,50 +282,11 @@ export class DocumentDbCluster extends Construct {
       '&tlsCAFile=global-bundle.pem&replicaSet=rs0',
       '&readPreference=secondaryPreferred&retryWrites=false',
     ]);
-
-    const connStringParamName = `/${config.name}/documentdb/connection_string`;
-    new cr.AwsCustomResource(this, 'ConnectionStringParam', {
-      onCreate: {
-        service: 'SSM',
-        action: 'putParameter',
-        parameters: {
-          Name: connStringParamName,
-          Description: 'DocumentDB Cluster connection string',
-          Type: 'SecureString',
-          KeyId: this.kmsKey.keyId,
-          Value: connectionString,
-          Overwrite: true,
-        },
-        physicalResourceId: cr.PhysicalResourceId.of(connStringParamName),
-      },
-      onUpdate: {
-        service: 'SSM',
-        action: 'putParameter',
-        parameters: {
-          Name: connStringParamName,
-          Description: 'DocumentDB Cluster connection string',
-          Type: 'SecureString',
-          KeyId: this.kmsKey.keyId,
-          Value: connectionString,
-          Overwrite: true,
-        },
-        physicalResourceId: cr.PhysicalResourceId.of(connStringParamName),
-      },
-      onDelete: {
-        service: 'SSM',
-        action: 'deleteParameter',
-        parameters: { Name: connStringParamName },
-      },
-      policy: cr.AwsCustomResourcePolicy.fromStatements([
-        new iam.PolicyStatement({
-          actions: ['ssm:PutParameter', 'ssm:DeleteParameter'],
-          resources: [cdk.Stack.of(this).formatArn({ service: 'ssm', resource: 'parameter', resourceName: `${config.name}/documentdb/connection_string` })],
-        }),
-        new iam.PolicyStatement({
-          actions: ['kms:Encrypt', 'kms:GenerateDataKey'],
-          resources: [this.kmsKey.keyArn],
-        }),
-      ]),
-    });
+    putSecureSsmParam(
+      this, 'ConnectionStringParam',
+      `/${config.name}/documentdb/connection_string`,
+      connectionString,
+      this.kmsKey,
+    );
   }
 }

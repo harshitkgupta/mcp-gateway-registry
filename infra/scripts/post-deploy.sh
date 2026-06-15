@@ -1,37 +1,16 @@
 #!/bin/bash
-#
-# Post-deploy automation for MCP Gateway Registry.
-#
-# Runs after CDK deploy to configure Keycloak and wire up secrets
-# so the deployment is fully functional without manual steps.
-#
-# Usage:
-#   ./infra/scripts/post-deploy.sh
-#
-# Requires:
-#   - AWS CLI configured with valid credentials
-#   - CDK_KEYCLOAK_ADMIN_PASSWORD environment variable set
-#   - jq installed
-#   - cdk-outputs.json from a successful CDK deploy
-#
+# Post-deploy automation: configure Keycloak, wire up secrets, restart services.
+# Run by deploy.sh; needs CDK_KEYCLOAK_ADMIN_PASSWORD and cdk-outputs.json.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFRA_DIR="$(dirname "$SCRIPT_DIR")"
 PROJECT_ROOT="$(dirname "$INFRA_DIR")"
+
+source "$SCRIPT_DIR/_lib.sh"
+[ -f "$SCRIPT_DIR/set-env.sh" ] && source "$SCRIPT_DIR/set-env.sh"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-_log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
-_log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-_log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
-_log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # ---------------------------------------------------------------------------
 # Read endpoints from cdk-outputs.json
@@ -44,29 +23,11 @@ _read_outputs() {
     exit 1
   fi
 
-  KEYCLOAK_URL=$(python3 -c "
-import json
-d = json.load(open('$outputs_file'))
-print(d.get('Registry-Service', {}).get('KeycloakUrl', '') or d.get('Registry-Auth', {}).get('KeycloakUrl', ''))
-" 2>/dev/null)
-
-  REGISTRY_URL=$(python3 -c "
-import json
-d = json.load(open('$outputs_file'))
-print(d.get('Registry-Service', {}).get('RegistryUrl', ''))
-" 2>/dev/null)
-
-  GRADIO_URL=$(python3 -c "
-import json
-d = json.load(open('$outputs_file'))
-print(d.get('Registry-Service', {}).get('GradioUiUrl', ''))
-" 2>/dev/null)
-
-  GRAFANA_URL=$(python3 -c "
-import json
-d = json.load(open('$outputs_file'))
-print(d.get('Registry-Service', {}).get('GrafanaUrl', ''))
-" 2>/dev/null)
+  eval "$(jq -r '@sh "
+    KEYCLOAK_URL=\(."Registry-Service".KeycloakUrl // ."Registry-Auth".KeycloakUrl // "")
+    REGISTRY_URL=\(."Registry-Service".RegistryUrl // "")
+    GRADIO_URL=\(."Registry-Service".GradioUiUrl // "")
+    GRAFANA_URL=\(."Registry-Service".GrafanaUrl // "")"' "$outputs_file")"
 
   if [ -z "$KEYCLOAK_URL" ] || [ -z "$REGISTRY_URL" ]; then
     _log_error "Could not read Keycloak/Registry URLs from cdk-outputs.json"
@@ -213,18 +174,16 @@ _disable_ssl_via_ecs_exec() {
 
 _init_keycloak() {
   local init_script="$PROJECT_ROOT/keycloak/setup/init-keycloak.sh"
-  if [ ! -f "$init_script" ]; then
-    _log_error "init-keycloak.sh not found at $init_script"
-    exit 1
-  fi
+  [ -f "$init_script" ] || { _log_error "init-keycloak.sh not found at $init_script"; exit 1; }
 
   _log_info "Running Keycloak initialization (realm, clients, groups, users)..."
 
-  # Create temporary .env for the init script
+  # init-keycloak.sh source-loads $PROJECT_ROOT/.env. Write it only if absent;
+  # rm-on-exit via a non-local TMP_ENV (bash 3.2 RETURN traps lose locals).
   local tmp_env="$PROJECT_ROOT/.env"
-  local cleanup_env=false
+  local cleanup=false
   if [ ! -f "$tmp_env" ]; then
-    cleanup_env=true
+    cleanup=true
     cat > "$tmp_env" <<ENVEOF
 KEYCLOAK_ADMIN_URL=${KEYCLOAK_URL}
 KEYCLOAK_ADMIN=${KC_ADMIN_USER}
@@ -236,13 +195,10 @@ INITIAL_USER_PASSWORD=testpass123
 ENVEOF
   fi
 
-  (cd "$PROJECT_ROOT" && bash "$init_script") || {
-    _log_error "init-keycloak.sh failed"
-    [ "$cleanup_env" = true ] && rm -f "$tmp_env"
-    exit 1
-  }
-
-  [ "$cleanup_env" = true ] && rm -f "$tmp_env"
+  local rc=0
+  (cd "$PROJECT_ROOT" && bash "$init_script") || rc=$?
+  [ "$cleanup" = true ] && rm -f "$tmp_env"
+  [ "$rc" -ne 0 ] && { _log_error "init-keycloak.sh failed"; exit "$rc"; }
   _log_success "Keycloak initialization complete"
 }
 
@@ -252,58 +208,25 @@ ENVEOF
 
 _update_client_secrets() {
   _log_info "Updating Secrets Manager with Keycloak client secrets..."
+  local token; token=$(_get_admin_token)
 
-  local token
-  token=$(_get_admin_token)
+  # macOS bash 3.2 has no assoc arrays — use "client_id|secret_id" pairs.
+  for pair in \
+    "mcp-gateway-web|mcp-gateway-keycloak-client-secret" \
+    "mcp-gateway-m2m|mcp-gateway-keycloak-m2m-client-secret"; do
+    local client_id="${pair%%|*}" secret_id="${pair##*|}"
+    local uuid; uuid=$(curl -s -H "Authorization: Bearer ${token}" \
+      "${KEYCLOAK_URL}/admin/realms/mcp-gateway/clients?clientId=${client_id}" | jq -r '.[0].id // empty')
+    [ -z "$uuid" ] && { _log_error "Could not find ${client_id} client"; return 1; }
 
-  # Get web client secret
-  local web_client_uuid
-  web_client_uuid=$(curl -s -H "Authorization: Bearer ${token}" \
-    "${KEYCLOAK_URL}/admin/realms/mcp-gateway/clients?clientId=mcp-gateway-web" | \
-    jq -r '.[0].id // empty')
+    local secret; secret=$(curl -s -H "Authorization: Bearer ${token}" \
+      "${KEYCLOAK_URL}/admin/realms/mcp-gateway/clients/${uuid}/client-secret" | jq -r '.value // empty')
+    [ -z "$secret" ] && { _log_error "Could not retrieve secret for ${client_id}"; return 1; }
 
-  if [ -z "$web_client_uuid" ]; then
-    _log_error "Could not find mcp-gateway-web client"
-    return 1
-  fi
-
-  local web_secret
-  web_secret=$(curl -s -H "Authorization: Bearer ${token}" \
-    "${KEYCLOAK_URL}/admin/realms/mcp-gateway/clients/${web_client_uuid}/client-secret" | \
-    jq -r '.value // empty')
-
-  # Get M2M client secret
-  local m2m_client_uuid
-  m2m_client_uuid=$(curl -s -H "Authorization: Bearer ${token}" \
-    "${KEYCLOAK_URL}/admin/realms/mcp-gateway/clients?clientId=mcp-gateway-m2m" | \
-    jq -r '.[0].id // empty')
-
-  if [ -z "$m2m_client_uuid" ]; then
-    _log_error "Could not find mcp-gateway-m2m client"
-    return 1
-  fi
-
-  local m2m_secret
-  m2m_secret=$(curl -s -H "Authorization: Bearer ${token}" \
-    "${KEYCLOAK_URL}/admin/realms/mcp-gateway/clients/${m2m_client_uuid}/client-secret" | \
-    jq -r '.value // empty')
-
-  if [ -z "$web_secret" ] || [ -z "$m2m_secret" ]; then
-    _log_error "Could not retrieve client secrets from Keycloak"
-    return 1
-  fi
-
-  # Update Secrets Manager
-  aws secretsmanager put-secret-value \
-    --region "$AWS_REGION" \
-    --secret-id mcp-gateway-keycloak-client-secret \
-    --secret-string "{\"client_secret\":\"${web_secret}\"}" > /dev/null 2>&1
-
-  aws secretsmanager put-secret-value \
-    --region "$AWS_REGION" \
-    --secret-id mcp-gateway-keycloak-m2m-client-secret \
-    --secret-string "{\"client_secret\":\"${m2m_secret}\"}" > /dev/null 2>&1
-
+    aws secretsmanager put-secret-value --region "$AWS_REGION" \
+      --secret-id "$secret_id" \
+      --secret-string "{\"client_secret\":\"${secret}\"}" > /dev/null 2>&1
+  done
   _log_success "Secrets Manager updated with real client secrets"
 }
 
@@ -336,115 +259,40 @@ _restart_services() {
 }
 
 # ---------------------------------------------------------------------------
-# Load scopes into DocumentDB via ECS Exec on the registry container
+# Run a Python script in the registry container via ECS Exec.
+# Args: <label> <command-line> <success-grep-pattern>
 # ---------------------------------------------------------------------------
 
-_load_scopes() {
-  _log_info "Loading scopes configuration into DocumentDB..."
-
+_run_in_registry() {
+  local label="$1" cmd="$2" success="$3"
   local cluster="mcp-gateway-ecs-cluster"
   local task_arn
   task_arn=$(aws ecs list-tasks --cluster "$cluster" --service-name mcp-gateway-registry \
     --region "$AWS_REGION" --desired-status RUNNING \
     --query 'taskArns[0]' --output text 2>/dev/null)
-
   if [ -z "$task_arn" ] || [ "$task_arn" = "None" ]; then
-    _log_error "No running registry task found for scopes loading"
+    _log_error "No running registry task for $label"
     return 1
   fi
 
-  local task_id="${task_arn##*/}"
-
   local output
-  output=$(aws ecs execute-command --cluster "$cluster" --task "$task_id" \
-    --container registry --interactive \
-    --command "sh -c '/app/.venv/bin/python scripts/load-scopes.py --scopes-file /app/config/scopes.yml 2>&1'" \
+  output=$(aws ecs execute-command --cluster "$cluster" --task "${task_arn##*/}" \
+    --container registry --interactive --command "sh -c '$cmd 2>&1'" \
     --region "$AWS_REGION" 2>&1) || true
 
-  if echo "$output" | grep -q "Successfully loaded\|Scopes loading complete"; then
-    _log_success "Scopes loaded into DocumentDB"
+  if echo "$output" | grep -qE "$success"; then
+    _log_success "$label OK"
     return 0
   fi
-
-  if echo "$output" | grep -q "No changes for scope\|Updated scope"; then
-    _log_success "Scopes already loaded (no changes needed)"
-    return 0
-  fi
-
-  _log_warn "ECS Exec scopes output: $output"
-  _log_warn "Scopes loading may have failed. Check registry logs."
+  _log_warn "$label output: $output"
   return 1
 }
 
-# ---------------------------------------------------------------------------
-# Load UI-scope documents into DocumentDB
-# The built-in load-scopes.py only creates docs for top-level YAML keys (MCP
-# server scopes). UI-scope names (registry-admins, etc.) that define
-# publish_agent and other UI permissions exist only under UI-Scopes and need
-# separate documents. Without them, group_mappings lookups and ui_permissions
-# resolution fail, causing 403 on agent registration.
-# ---------------------------------------------------------------------------
-
-_load_ui_scopes() {
-  _log_info "Loading UI-scope documents into DocumentDB..."
-
-  local cluster="mcp-gateway-ecs-cluster"
-  local task_arn
-  task_arn=$(aws ecs list-tasks --cluster "$cluster" --service-name mcp-gateway-registry \
-    --region "$AWS_REGION" --desired-status RUNNING \
-    --query 'taskArns[0]' --output text 2>/dev/null)
-
-  if [ -z "$task_arn" ] || [ "$task_arn" = "None" ]; then
-    _log_error "No running registry task found for UI scopes loading"
-    return 1
-  fi
-
-  local task_id="${task_arn##*/}"
-
-  # Base64-encode the Python script to avoid nested quoting issues in ECS Exec.
-  # Uses the registry's own get_documentdb_client() which handles TLS/auth correctly.
-  local py_b64
-  py_b64=$(printf '%s\n' \
-'import asyncio, sys, os, yaml' \
-'sys.path.insert(0, "/app")' \
-'from registry.repositories.documentdb.client import get_documentdb_client, get_collection_name' \
-'async def main():' \
-'    sf = "/app/config/scopes.yml"' \
-'    if not os.path.exists(sf): sf = "/app/registry/config/scopes.yml"' \
-'    with open(sf) as f: data = yaml.safe_load(f)' \
-'    ui = data.get("UI-Scopes", {})' \
-'    gm = data.get("group_mappings", {})' \
-'    top = set(k for k in data if k not in ("group_mappings", "UI-Scopes"))' \
-'    db = await get_documentdb_client()' \
-'    coll_name = get_collection_name("mcp_scopes")' \
-'    co = db[coll_name]' \
-'    n = 0' \
-'    for name, perms in ui.items():' \
-'        if name in top: continue' \
-'        grps = [g for g, s in gm.items() if name in s]' \
-'        doc = {"_id": name, "group_mappings": grps, "server_access": [], "ui_permissions": perms}' \
-'        r = await co.update_one({"_id": name}, {"$set": doc}, upsert=True)' \
-'        if r.upserted_id or r.modified_count > 0:' \
-'            n += 1' \
-'            print(f"Upserted: {name} groups={grps}")' \
-'        else: print(f"Exists: {name}")' \
-'    print(f"UI_SCOPES_LOADED_OK: {n} documents")' \
-'asyncio.run(main())' | base64)
-
-  local output
-  output=$(aws ecs execute-command --cluster "$cluster" --task "$task_id" \
-    --container registry --interactive \
-    --command "sh -c 'echo ${py_b64} | base64 -d | /app/.venv/bin/python 2>&1'" \
-    --region "$AWS_REGION" 2>&1) || true
-
-  if echo "$output" | grep -q "UI_SCOPES_LOADED_OK"; then
-    _log_success "UI-scope documents loaded into DocumentDB"
-    return 0
-  fi
-
-  _log_warn "UI scopes ECS Exec output: $output"
-  _log_warn "UI scopes loading may have failed."
-  return 1
+_load_scopes() {
+  _log_info "Loading scopes configuration into DocumentDB..."
+  _run_in_registry "scopes load" \
+    "/app/.venv/bin/python scripts/load-scopes.py --scopes-file /app/config/scopes.yml" \
+    "Successfully loaded|Scopes loading complete|No changes for scope|Updated scope"
 }
 
 # ---------------------------------------------------------------------------
@@ -489,43 +337,42 @@ _validate_endpoints() {
 # ---------------------------------------------------------------------------
 
 _print_summary() {
-  local grafana_password="${CDK_GRAFANA_ADMIN_PASSWORD:-GrafanaAdmin2026}"
+  local grafana_password="${CDK_GRAFANA_ADMIN_PASSWORD:-(unset \xE2\x80\x94 set CDK_GRAFANA_ADMIN_PASSWORD and redeploy)}"
+  # printf %b interprets the \033 escape codes that heredoc passes through verbatim.
+  printf '%b' "$(cat <<EOF
 
-  echo ""
-  echo "============================================"
-  echo "  Deployment Complete"
-  echo "============================================"
-  echo ""
-  echo "  Service URLs"
-  echo "  ------------"
-  echo -e "  Registry:          ${GREEN}${REGISTRY_URL}${NC}"
-  echo -e "  Registry API:      ${GREEN}${REGISTRY_URL}/api/v1${NC}"
-  echo -e "  Gradio UI:         ${GREEN}${GRADIO_URL:-${REGISTRY_URL}:7860}${NC}"
-  echo -e "  Auth Server:       ${GREEN}${REGISTRY_URL}:8888${NC}"
-  echo -e "  Keycloak:          ${GREEN}${KEYCLOAK_URL}${NC}"
-  echo -e "  Keycloak Admin:    ${GREEN}${KEYCLOAK_URL}/admin${NC}"
-  if [ -n "${GRAFANA_URL:-}" ]; then
-    echo -e "  Grafana:           ${GREEN}${GRAFANA_URL}${NC}"
-  fi
-  echo ""
-  echo "  Login Credentials"
-  echo "  -----------------"
-  echo "  Registry / Gradio UI (Keycloak SSO):"
-  echo -e "    Admin user:      ${YELLOW}admin${NC} / ${YELLOW}${KC_ADMIN_PASSWORD}${NC}"
-  echo -e "    Test user:       ${YELLOW}testuser${NC} / ${YELLOW}testpass123${NC}"
-  echo ""
-  echo "  Keycloak Admin Console:"
-  echo -e "    Username:        ${YELLOW}${KC_ADMIN_USER}${NC}"
-  echo -e "    Password:        ${YELLOW}${KC_ADMIN_PASSWORD}${NC}"
-  echo ""
-  if [ -n "${GRAFANA_URL:-}" ]; then
-    echo "  Grafana:"
-    echo -e "    Username:        ${YELLOW}admin${NC}"
-    echo -e "    Password:        ${YELLOW}${grafana_password}${NC}"
-    echo ""
-  fi
-  echo "============================================"
-  echo ""
+============================================
+  Deployment Complete
+============================================
+
+  Service URLs
+  ------------
+  Registry:          ${GREEN}${REGISTRY_URL}${NC}
+  Registry API:      ${GREEN}${REGISTRY_URL}/api/v1${NC}
+  Gradio UI:         ${GREEN}${GRADIO_URL:-${REGISTRY_URL}:7860}${NC}
+  Auth Server:       ${GREEN}${REGISTRY_URL}:8888${NC}
+  Keycloak:          ${GREEN}${KEYCLOAK_URL}${NC}
+  Keycloak Admin:    ${GREEN}${KEYCLOAK_URL}/admin${NC}${GRAFANA_URL:+
+  Grafana:           ${GREEN}${GRAFANA_URL}${NC}}
+
+  Login Credentials
+  -----------------
+  Registry / Gradio UI (Keycloak SSO):
+    Admin user:      ${YELLOW}admin${NC} / ${YELLOW}${KC_ADMIN_PASSWORD}${NC}
+    Test user:       ${YELLOW}testuser${NC} / ${YELLOW}testpass123${NC}
+
+  Keycloak Admin Console:
+    Username:        ${YELLOW}${KC_ADMIN_USER}${NC}
+    Password:        ${YELLOW}${KC_ADMIN_PASSWORD}${NC}${GRAFANA_URL:+
+
+  Grafana:
+    Username:        ${YELLOW}admin${NC}
+    Password:        ${YELLOW}${grafana_password}${NC}}
+============================================
+
+EOF
+)"
+  printf '\n'
 }
 
 # ---------------------------------------------------------------------------
@@ -548,83 +395,29 @@ main() {
     exit 1
   fi
 
-  # Step 1: Read endpoints from CDK outputs
   _read_outputs
-
-  # Step 2: Wait for Keycloak
   _wait_for_keycloak
 
-  # Step 3: Disable SSL on master realm via ECS Exec (bypasses ALB HTTPS requirement)
-  # On fresh deploys, ECS Exec (SSM agent) may not be ready immediately.
-  # Retry with backoff to handle the SSM agent registration delay.
-  local ssl_disabled=false
-  local ssl_attempt=0
-  local ssl_max_attempts=3
-  while [ $ssl_attempt -lt $ssl_max_attempts ]; do
-    if _disable_ssl_via_ecs_exec; then
-      ssl_disabled=true
-      break
-    fi
-    ssl_attempt=$((ssl_attempt + 1))
-    if [ $ssl_attempt -lt $ssl_max_attempts ]; then
-      _log_warn "ECS Exec not ready (attempt $ssl_attempt/$ssl_max_attempts). Waiting 30s for SSM agent..."
-      sleep 30
-    fi
-  done
-
-  if [ "$ssl_disabled" = false ]; then
-    _log_error "Failed to disable SSL after $ssl_max_attempts attempts. Cannot proceed with Keycloak init."
-    _log_error "Run post-deploy.sh manually once ECS Exec is available."
+  # SSM agent on a fresh task takes ~30s to register, so retry.
+  if ! _retry "SSL disable" 3 30 _disable_ssl_via_ecs_exec; then
+    _log_error "Failed to disable SSL. Run post-deploy.sh once ECS Exec is available."
     exit 1
   fi
 
-  # Step 4: Initialize Keycloak (realm, clients, groups, users)
   _init_keycloak
 
-  # Step 5: Disable SSL requirement on mcp-gateway realm (via Admin API - now accessible)
   _log_info "Disabling SSL requirement on mcp-gateway realm..."
-  local token
-  token=$(_get_admin_token)
-  _disable_ssl_required "$token" "mcp-gateway"
+  _disable_ssl_required "$(_get_admin_token)" "mcp-gateway"
 
-  # Step 6: Update Secrets Manager with real client secrets
   _update_client_secrets
 
-  # Step 7: Load scopes into DocumentDB (before restart — current task has SSM ready)
-  local scopes_loaded=false
-  local scopes_attempt=0
-  local scopes_max_attempts=3
-  while [ $scopes_attempt -lt $scopes_max_attempts ]; do
-    if _load_scopes; then
-      scopes_loaded=true
-      break
-    fi
-    scopes_attempt=$((scopes_attempt + 1))
-    if [ $scopes_attempt -lt $scopes_max_attempts ]; then
-      _log_warn "Scopes loading failed (attempt $scopes_attempt/$scopes_max_attempts). Retrying in 20s..."
-      sleep 20
-    fi
-  done
+  # Top-level scopes (server defs) into DocumentDB. UI-scope group docs are
+  # loaded by the ScopesLoader Lambda in the Registry-Service stack.
+  _retry "Scopes load" 3 20 _load_scopes \
+    || _log_warn "Scopes could not be loaded. Agent registration may return 403."
 
-  if [ "$scopes_loaded" = false ]; then
-    _log_warn "Scopes could not be loaded after $scopes_max_attempts attempts."
-    _log_warn "Run manually: ./infra/scripts/post-deploy.sh (or use ECS Exec to run load-scopes.py)"
-    _log_warn "Without scopes, agent registration will fail with 403."
-  fi
-
-  # Step 7b: Load UI-scope documents (registry-admins, etc.) that load-scopes.py misses.
-  # These are required for publish_agent and other UI permission resolution.
-  if [ "$scopes_loaded" = true ]; then
-    _load_ui_scopes || _log_warn "UI scopes loading failed. Agent registration may return 403."
-  fi
-
-  # Step 8: Restart registry and auth-server services (picks up new secrets)
   _restart_services
-
-  # Step 9: Validate all endpoints
   _validate_endpoints
-
-  # Step 10: Print summary
   _print_summary
 }
 

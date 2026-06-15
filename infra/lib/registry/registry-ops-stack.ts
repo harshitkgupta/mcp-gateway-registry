@@ -1,18 +1,6 @@
 /**
- * RegistryOpsStack - Secret rotation Lambdas for DocumentDB and Keycloak RDS.
- *
- * Translates terraform/aws-ecs/secret-rotation.tf and secret-rotation-config.tf
- * into AWS CDK.
- *
- * Creates:
- *   - IAM role + policies for rotation Lambdas
- *   - Lambda security group with egress to DocumentDB (27017), RDS (3306), HTTPS (443)
- *   - Ingress rules on DocumentDB SG and Keycloak DB SG from Lambda SG
- *   - DocumentDB rotation Lambda (using SecretRotation construct)
- *   - RDS rotation Lambda (using SecretRotation construct)
- *   - CfnRotationSchedule for both secrets (30-day auto rotation)
- *
- * This stack depends on RegistryNetworkStack and RegistryDataStack.
+ * RegistryOpsStack - Secret rotation: custom Lambda for DocumentDB,
+ * AWS-hosted rotator (mysqlSingleUser) for Keycloak Aurora MySQL.
  */
 
 import * as cdk from 'aws-cdk-lib';
@@ -26,15 +14,6 @@ import { RegistryConfig } from './registry-config';
 import { RegistryNetworkStack } from './registry-network-stack';
 import { RegistryDataStack } from './registry-data-stack';
 import { SecretRotation } from './constructs/secret-rotation';
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-const DOCUMENTDB_PORT = 27017;
-const MYSQL_PORT = 3306;
-const HTTPS_PORT = 443;
-const ROTATION_INTERVAL_DAYS = 30;
 
 // ---------------------------------------------------------------------------
 // Stack props
@@ -61,6 +40,9 @@ export class RegistryOpsStack extends cdk.Stack {
     const { vpc, privateSubnets } = networkStack;
     const region = this.region;
 
+    // Required for CfnRotationSchedule.hostedRotationLambda below.
+    this.templateOptions.transforms = ['AWS::SecretsManager-2020-07-23'];
+
     // ==================================================================
     // IAM role for rotation Lambda functions
     // ==================================================================
@@ -85,25 +67,20 @@ export class RegistryOpsStack extends cdk.Stack {
     // Egress rules
     // ------------------------------------------------------------------
 
-    // Lambda -> DocumentDB (27017)
     this.rotationLambdaSg.addEgressRule(
       ec2.Peer.securityGroupId(dataStack.documentDbSg.securityGroupId),
-      ec2.Port.tcp(DOCUMENTDB_PORT),
-      'Allow Lambda to connect to DocumentDB for rotation',
+      ec2.Port.tcp(27017),
+      'Lambda to DocumentDB',
     );
-
-    // Lambda -> RDS (3306)
     this.rotationLambdaSg.addEgressRule(
       ec2.Peer.securityGroupId(dataStack.keycloakDbSg.securityGroupId),
-      ec2.Port.tcp(MYSQL_PORT),
-      'Allow Lambda to connect to RDS for rotation',
+      ec2.Port.tcp(3306),
+      'Lambda to RDS',
     );
-
-    // Lambda -> HTTPS 0.0.0.0/0 (Secrets Manager API)
     this.rotationLambdaSg.addEgressRule(
       ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(HTTPS_PORT),
-      'Allow Lambda to call AWS APIs (Secrets Manager, KMS)',
+      ec2.Port.tcp(443),
+      'Lambda to AWS APIs (Secrets Manager, KMS)',
     );
 
     // ------------------------------------------------------------------
@@ -112,24 +89,17 @@ export class RegistryOpsStack extends cdk.Stack {
     // (Ops depends on Data, so Data SG objects cannot reference Ops SG)
     // ------------------------------------------------------------------
 
-    // DocumentDB <- Lambda (27017)
     new ec2.CfnSecurityGroupIngress(this, 'DocDbFromLambda', {
       groupId: dataStack.documentDbSg.securityGroupId,
-      ipProtocol: 'tcp',
-      fromPort: DOCUMENTDB_PORT,
-      toPort: DOCUMENTDB_PORT,
+      ipProtocol: 'tcp', fromPort: 27017, toPort: 27017,
       sourceSecurityGroupId: this.rotationLambdaSg.securityGroupId,
-      description: 'Allow Lambda rotation function to connect to DocumentDB',
+      description: 'Lambda rotation to DocumentDB',
     });
-
-    // Keycloak DB <- Lambda (3306)
     new ec2.CfnSecurityGroupIngress(this, 'RdsFromLambda', {
       groupId: dataStack.keycloakDbSg.securityGroupId,
-      ipProtocol: 'tcp',
-      fromPort: MYSQL_PORT,
-      toPort: MYSQL_PORT,
+      ipProtocol: 'tcp', fromPort: 3306, toPort: 3306,
       sourceSecurityGroupId: this.rotationLambdaSg.securityGroupId,
-      description: 'Allow Lambda rotation function to connect to RDS',
+      description: 'Hosted rotator to RDS',
     });
 
     // ==================================================================
@@ -164,53 +134,27 @@ export class RegistryOpsStack extends cdk.Stack {
       environmentVariables: lambdaEnv,
     });
 
-    // ==================================================================
-    // RDS rotation Lambda
-    // ==================================================================
-
-    const rdsRotation = new SecretRotation(this, 'RdsRotation', {
-      rotationName: `${config.name}-rotate-rds`,
-      vpc,
-      privateSubnets,
-      lambdaSg: this.rotationLambdaSg,
-      secretArn: dataStack.keycloakDbSecret.secretArn,
-      lambdaRole: rotationRole,
-      lambdaCodePath: path.join(lambdaBasePath, 'rotate-rds'),
-      environmentVariables: lambdaEnv,
+    // RDS Aurora MySQL: AWS-hosted rotator. Use the L1 directly in this stack
+    // (addRotationSchedule attaches to the secret's stack and creates a Data
+    // -> Ops cycle via the rotationLambdaSg reference).
+    new secretsmanager.CfnRotationSchedule(this, 'RdsRotationSchedule', {
+      secretId: dataStack.keycloakDbSecret.secretArn,
+      hostedRotationLambda: {
+        rotationType: 'MySQLSingleUser',
+        vpcSecurityGroupIds: this.rotationLambdaSg.securityGroupId,
+        vpcSubnetIds: privateSubnets.map((s) => s.subnetId).join(','),
+      },
+      rotationRules: { automaticallyAfterDays: 30 },
     });
 
-    // ==================================================================
-    // Rotation schedules (30-day auto rotation)
-    // ==================================================================
-
     const docdbRotationSchedule = new secretsmanager.CfnRotationSchedule(
-      this,
-      'DocumentDbRotationSchedule',
-      {
+      this, 'DocumentDbRotationSchedule', {
         secretId: dataStack.documentDbSecretArn,
         rotationLambdaArn: docdbRotation.lambdaFunction.functionArn,
-        rotationRules: {
-          automaticallyAfterDays: ROTATION_INTERVAL_DAYS,
-        },
+        rotationRules: { automaticallyAfterDays: 30 },
       },
     );
-
-    // Ensure Lambda permission exists before Secrets Manager tries to invoke
     docdbRotationSchedule.node.addDependency(docdbRotation.lambdaFunction);
-
-    const rdsRotationSchedule = new secretsmanager.CfnRotationSchedule(
-      this,
-      'RdsRotationSchedule',
-      {
-        secretId: dataStack.keycloakDbSecret.secretArn,
-        rotationLambdaArn: rdsRotation.lambdaFunction.functionArn,
-        rotationRules: {
-          automaticallyAfterDays: ROTATION_INTERVAL_DAYS,
-        },
-      },
-    );
-
-    rdsRotationSchedule.node.addDependency(rdsRotation.lambdaFunction);
 
     // ------------------------------------------------------------------
     // Common tags
@@ -249,10 +193,7 @@ function _createRotationRole(
         'secretsmanager:PutSecretValue',
         'secretsmanager:UpdateSecretVersionStage',
       ],
-      resources: [
-        dataStack.documentDbSecretArn,
-        dataStack.keycloakDbSecret.secretArn,
-      ],
+      resources: [dataStack.documentDbSecretArn],
     }),
   );
 
@@ -266,7 +207,7 @@ function _createRotationRole(
     }),
   );
 
-  // ---- KMS access (both keys) ----
+  // ---- KMS access (DocumentDB key only — Aurora rotation is hosted) ----
   role.addToPolicy(
     new iam.PolicyStatement({
       sid: 'KMSAccess',
@@ -276,30 +217,7 @@ function _createRotationRole(
         'kms:DescribeKey',
         'kms:GenerateDataKey',
       ],
-      resources: [
-        dataStack.documentDbKmsKey.keyArn,
-        dataStack.rdsKmsKey.keyArn,
-      ],
-    }),
-  );
-
-  // ---- RDS access (Keycloak Aurora cluster) ----
-  // Build the ARN from the CfnDBCluster ref (cluster identifier)
-  const keycloakClusterArn = cdk.Fn.sub(
-    'arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster:${ClusterId}',
-    { ClusterId: dataStack.keycloakDbCluster.ref },
-  );
-
-  role.addToPolicy(
-    new iam.PolicyStatement({
-      sid: 'RDSAccess',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'rds:DescribeDBInstances',
-        'rds:DescribeDBClusters',
-        'rds:ModifyDBCluster',
-      ],
-      resources: [keycloakClusterArn],
+      resources: [dataStack.documentDbKmsKey.keyArn],
     }),
   );
 
