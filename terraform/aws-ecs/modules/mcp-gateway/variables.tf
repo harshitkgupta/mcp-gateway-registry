@@ -1213,6 +1213,18 @@ variable "tool_filter_audit_log_level" {
   default     = "INFO"
 }
 
+variable "mcp_proxy_sig_ttl_seconds" {
+  description = "Lifetime (seconds) of the /validate-minted /mcp-proxy internal token; the replay-window cap. Minimum 5. Default 30."
+  type        = number
+  default     = 30
+}
+
+variable "mcp_proxy_sig_leeway_seconds" {
+  description = "Clock-skew leeway (seconds) on the /mcp-proxy internal token exp/iat checks. Default 5."
+  type        = number
+  default     = 5
+}
+
 variable "custom_entity_types_enabled" {
   description = "Main switch for the custom-entity-types feature (dynamic tabs + endpoints). Off by default = no behavior change for existing deployments."
   type        = bool

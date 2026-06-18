@@ -33,10 +33,14 @@ import yaml
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Cookie, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
-from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from jwt.api_jwk import PyJWK
 
 # Import metrics middleware
+from internal_request_token import (
+    mint_mcp_proxy_token,
+    verify_mcp_proxy_token,
+)
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from jwt.api_jwk import PyJWK
 from metrics_middleware import add_auth_metrics_middleware
 
 # Import provider factory
@@ -154,6 +158,36 @@ def _read_mcp_filter_enabled() -> bool:
     return raw in ("true", "1", "yes")
 
 
+def _attach_mcp_proxy_token(
+    request: "Request",
+    response: "JSONResponse",
+    subject: str,
+    scopes: list[str],
+    server_name: str,
+) -> None:
+    """Mint and attach the X-Internal-Token for the /mcp-proxy hop.
+
+    Only mints when nginx forwarded a resolved upstream (``X-Resolved-Upstream``)
+    into this /validate subrequest -- i.e. this validation backs an MCP-proxy
+    request, not a UI/API location. The token binds the resolved upstream so
+    mcp_proxy can ignore the forgeable inbound headers. If minting fails (e.g.
+    empty subject), no token is attached: mcp_proxy then rejects (fail-closed)
+    rather than trusting unsigned headers.
+    """
+    resolved_upstream = request.headers.get("X-Resolved-Upstream", "")
+    if not resolved_upstream:
+        return
+    try:
+        response.headers["X-Internal-Token"] = mint_mcp_proxy_token(
+            subject=subject,
+            scopes=scopes,
+            server_name=server_name,
+            upstream_url=resolved_upstream,
+        )
+    except ValueError as exc:
+        logger.error(f"/validate: could not mint mcp-proxy token: {exc}")
+
+
 def _read_mcp_proxy_max_body_bytes() -> int:
     default_bytes = 2 * 1024 * 1024
     minimum_bytes = 1024
@@ -200,6 +234,7 @@ def _log_scopes_loaded(scopes_config: dict) -> None:
         logger.info(
             f"Loaded scopes configuration on startup with {len(group_mappings)} group mappings"
         )
+
 
 # Static token auth: use static API key instead of IdP JWT for Registry API
 _registry_static_token_requested: bool = (
@@ -1961,6 +1996,14 @@ async def validate_request(request: Request):
                 response.headers["X-Server-Name"] = ""
                 response.headers["X-Tool-Name"] = ""
 
+                _attach_mcp_proxy_token(
+                    request,
+                    response,
+                    subject="federation-peer",
+                    scopes=federation_scopes,
+                    server_name="",
+                )
+
                 return response
 
             # If federation token didn't match, DON'T return 403 here.
@@ -2009,6 +2052,14 @@ async def validate_request(request: Request):
                     response.headers["X-Auth-Method"] = "network-trusted"
                     response.headers["X-Server-Name"] = ""
                     response.headers["X-Tool-Name"] = ""
+
+                    _attach_mcp_proxy_token(
+                        request,
+                        response,
+                        subject=identity["username"],
+                        scopes=identity["scopes"],
+                        server_name="",
+                    )
 
                     return response
 
@@ -2593,6 +2644,14 @@ async def validate_request(request: Request):
         response.headers["X-Server-Name"] = server_name or ""
         response.headers["X-Tool-Name"] = tool_name or ""
         response.headers["X-Groups"] = " ".join(validation_result.get("groups", []))
+
+        _attach_mcp_proxy_token(
+            request,
+            response,
+            subject=validation_result.get("username") or "",
+            scopes=user_scopes,
+            server_name=server_name or "",
+        )
 
         return response
 
@@ -4151,7 +4210,7 @@ def _select_forwarded_response_headers(
     return selected
 
 
-@app.post("/mcp-proxy/{server_name:path}")
+@app.post("/mcp-proxy/{server_name:path}", dependencies=[Depends(verify_mcp_proxy_token)])
 async def mcp_proxy(
     server_name: str,
     request: Request,
@@ -4159,21 +4218,23 @@ async def mcp_proxy(
     """Forward an MCP JSON-RPC POST to the upstream and optionally filter
     the tools/list result by the caller's tool allowlist.
 
-    nginx routes here after the /validate auth_request succeeds. Headers:
-      X-Upstream-Url: upstream MCP URL (required)
-      X-Scopes:       space-separated scopes (set by /validate response)
+    nginx routes here after the /validate auth_request succeeds. The
+    verify_mcp_proxy_token dependency has already verified the /validate-minted
+    X-Internal-Token and stashed its claims on request.state.mcp_proxy_claims;
+    identity/scopes/upstream are read from those verified claims, NOT from the
+    inbound X-User/X-Scopes/X-Upstream-Url headers.
 
     For methods other than "tools/list" or when filtering is disabled,
     the upstream response is returned verbatim. For "tools/list", the
     result.tools array is filtered using filter_tools_list_response.
     """
-    upstream_url = request.headers.get("X-Upstream-Url")
-    if not upstream_url:
-        logger.warning(f"mcp_proxy: missing X-Upstream-Url header for server={server_name}")
-        raise HTTPException(
-            status_code=400,
-            detail="Missing X-Upstream-Url header",
-        )
+    # verify_mcp_proxy_token (route dependency) has already verified the token
+    # and stashed the claims; it raises 401 before reaching here on any failure,
+    # so claims is always present. Identity/scopes/destination come from the
+    # verified token -- the inbound X-User/X-Scopes/X-Upstream-Url are ignored.
+    claims = request.state.mcp_proxy_claims
+    upstream_url = claims["upstream_url"]
+    user_scopes: list[str] = list(claims.get("scopes") or [])
 
     # Append the MCP sub-path from the request. server_name captures the full
     # path after /mcp-proxy/ (e.g. "airegistry-tools/mcp"). The first segment
@@ -4181,13 +4242,18 @@ async def mcp_proxy(
     # be appended to the upstream URL so the backend receives the correct route.
     # Skip if the upstream URL already ends with the sub-path (e.g. proxy_pass_url
     # is https://docs.mcp.cloudflare.com/mcp and sub_path is also /mcp).
+    #
+    # SECURITY: do NOT move this sub-path append into nginx. The X-Internal-Token
+    # binds the PRE-append upstream_url (the $backend_url /validate saw). Keeping
+    # the append here means the bound claim equals the upstream BASE and the
+    # outbound URL is base + sub_path on that same bound host -- the destination
+    # host is cryptographically pinned and the sub-path is confined to it. Moving
+    # the append to nginx would diverge the signed base from what /validate saw
+    # and 401 every request.
     if "/" in server_name:
         sub_path = server_name.split("/", 1)[1].lstrip("/")
         if sub_path and not upstream_url.rstrip("/").endswith("/" + sub_path):
             upstream_url = upstream_url.rstrip("/") + "/" + sub_path
-
-    raw_scopes = request.headers.get("X-Scopes", "")
-    user_scopes: list[str] = [s for s in raw_scopes.split() if s]
 
     # Read the incoming body once; we forward it to the upstream.
     try:

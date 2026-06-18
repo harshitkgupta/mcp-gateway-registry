@@ -826,6 +826,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    mcp_proxy_sig_ttl_seconds: int = Field(
+        default=30,
+        ge=5,
+        description=(
+            "Lifetime (seconds) of the /validate-minted /mcp-proxy internal "
+            "token; the replay-window cap. Short by design."
+        ),
+    )
+    mcp_proxy_sig_leeway_seconds: int = Field(
+        default=5,
+        ge=0,
+        description=(
+            "Clock-skew leeway (seconds) on the /mcp-proxy internal token " "exp/iat checks."
+        ),
+    )
+
     @property
     def nginx_updates_enabled(self) -> bool:
         """Check if nginx updates should be performed."""
@@ -997,9 +1013,7 @@ class Settings(BaseSettings):
         if isinstance(v, InternalDeploymentType):
             return v.value
         if not isinstance(v, str):
-            raise ValueError(
-                f"INTERNAL_DEPLOYMENT_TYPE must be a string, got {type(v).__name__}"
-            )
+            raise ValueError(f"INTERNAL_DEPLOYMENT_TYPE must be a string, got {type(v).__name__}")
         normalized = v.strip().lower()
         valid = {t.value for t in InternalDeploymentType}
         if normalized not in valid:
