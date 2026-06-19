@@ -428,12 +428,12 @@ module "ecs_service_auth" {
           value = var.tool_filter_audit_log_level
         },
         {
-          name  = "MCP_PROXY_SIG_TTL_SECONDS"
-          value = tostring(var.mcp_proxy_sig_ttl_seconds)
+          name  = "INTERNAL_TOKEN_TTL_SECONDS"
+          value = tostring(var.internal_token_ttl_seconds)
         },
         {
-          name  = "MCP_PROXY_SIG_LEEWAY_SECONDS"
-          value = tostring(var.mcp_proxy_sig_leeway_seconds)
+          name  = "INTERNAL_TOKEN_LEEWAY_SECONDS"
+          value = tostring(var.internal_token_leeway_seconds)
         },
         {
           name  = "METRICS_LEGACY_HTTP_POST"
@@ -636,24 +636,14 @@ module "ecs_service_auth" {
     }
   }
 
-  load_balancer = {
-    service = {
-      target_group_arn = module.alb.target_groups["auth"].arn
-      container_name   = "auth-server"
-      container_port   = 18888
-    }
-  }
+  # No ALB attachment: the public auth (:8888) listener/target-group was removed
+  # (registry internal-auth hardening). The auth-server is reached only via
+  # Service Connect (auth-server:8888 -> container 18888); external OAuth URLs
+  # resolve to the nginx-fronted :443/:80.
 
   subnet_ids = var.private_subnet_ids
-  security_group_ingress_rules = {
-    alb_18888 = {
-      description                  = "Auth server port from ALB"
-      from_port                    = 18888
-      to_port                      = 18888
-      ip_protocol                  = "tcp"
-      referenced_security_group_id = module.alb.security_group_id
-    }
-  }
+  # No ALB ingress rule needed: Service Connect proxy-to-proxy traffic is allowed
+  # by the registry->auth rule defined separately below.
   security_group_egress_rules = {
     all = {
       ip_protocol = "-1"
@@ -1176,6 +1166,15 @@ module "ecs_service_registry" {
           name  = "TOOL_FILTER_AUDIT_LOG_LEVEL"
           value = var.tool_filter_audit_log_level
         },
+        # Registry-UI internal token verification (the /api/ hop; minted by auth-server)
+        {
+          name  = "INTERNAL_TOKEN_TTL_SECONDS"
+          value = tostring(var.internal_token_ttl_seconds)
+        },
+        {
+          name  = "INTERNAL_TOKEN_LEEWAY_SECONDS"
+          value = tostring(var.internal_token_leeway_seconds)
+        },
         # Custom entity types (admin-defined, schema-driven catalog types)
         {
           name  = "CUSTOM_ENTITY_TYPES_ENABLED"
@@ -1635,11 +1634,9 @@ module "ecs_service_registry" {
       container_name   = "registry"
       container_port   = 8080 # Non-root nginx listens on 8080
     }
-    gradio = {
-      target_group_arn = module.alb.target_groups["gradio"].arn
-      container_name   = "registry"
-      container_port   = 7860
-    }
+    # The "gradio" (:7860) raw-app ALB attachment was removed (registry
+    # internal-auth hardening). nginx (:8080) is the only ALB-fronted port; the
+    # registry app is loopback-bound and reached over loopback inside the pod.
   }
 
   subnet_ids = var.private_subnet_ids
@@ -1658,13 +1655,7 @@ module "ecs_service_registry" {
       ip_protocol                  = "tcp"
       referenced_security_group_id = module.alb.security_group_id
     }
-    alb_7860 = {
-      description                  = "Gradio port"
-      from_port                    = 7860
-      to_port                      = 7860
-      ip_protocol                  = "tcp"
-      referenced_security_group_id = module.alb.security_group_id
-    }
+    # The ALB->registry:7860 (gradio) ingress rule was removed with its listener.
     mcpgw_internal = {
       description                  = "HTTP from mcpgw for internal API calls (non-root nginx)"
       from_port                    = 8080
@@ -1685,17 +1676,10 @@ module "ecs_service_registry" {
 }
 
 
-# Allow mcpgw to communicate with registry on port 7860
-resource "aws_vpc_security_group_ingress_rule" "mcpgw_to_registry" {
-  security_group_id            = module.ecs_service_registry.security_group_id
-  referenced_security_group_id = module.ecs_service_mcpgw.security_group_id
-  from_port                    = 7860
-  to_port                      = 7860
-  ip_protocol                  = "tcp"
-  description                  = "Allow mcpgw to access registry API"
-
-  tags = local.common_tags
-}
+# NOTE: the mcpgw->registry:7860 rule was removed (registry internal-auth
+# hardening). mcpgw reaches the registry via nginx at registry:8080 (see the
+# registry SG's mcpgw_internal rule); the raw app port 7860 is loopback-bound
+# and no longer reachable cross-container.
 
 
 # Allow registry to communicate with auth server on port 18888

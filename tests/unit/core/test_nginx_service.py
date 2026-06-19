@@ -1065,6 +1065,110 @@ def test_backend_url_declared_at_http_scope():
     for conf in conf_files:
         text = conf.read_text()
         assert backend_map.search(text), (
-            f"{conf.name} is missing the http-scope `map ... $backend_url {{ default \"\"; }}` "
+            f'{conf.name} is missing the http-scope `map ... $backend_url {{ default ""; }}` '
             f"declaration. Without it nginx fails to start when no /mcp-proxy/ block renders."
         )
+
+
+def test_registry_api_auth_declared_at_http_scope():
+    """$registry_api_auth has the same requirement as $backend_url: it is referenced in
+    the shared /validate block but only `set` inside the /api/ location blocks, so it must
+    be declared at http scope via a `map ... { default ""; }` or nginx fails to start on
+    requests that don't render an /api/ block."""
+    import re
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    conf_files = [
+        repo_root / "docker" / "nginx_rev_proxy_http_and_https.conf",
+        repo_root / "docker" / "nginx_rev_proxy_http_only.conf",
+    ]
+    api_auth_map = re.compile(r"^\s*map\s+\$\S+\s+\$registry_api_auth\s*\{", re.MULTILINE)
+    for conf in conf_files:
+        text = conf.read_text()
+        assert api_auth_map.search(text), (
+            f'{conf.name} is missing the http-scope `map ... $registry_api_auth {{ default ""; }}` '
+            f"declaration. Without it nginx fails to start on non-API requests."
+        )
+
+
+def test_no_server_scope_registry_api_auth_default_in_conf_templates():
+    """Same footgun as $backend_url: a server-scope `set $registry_api_auth "";`
+    would re-run inside the /validate auth_request subrequest and blank the marker
+    the /api/ location set, so /validate would never mint the registry-UI token.
+    The marker must be set ONLY inside the protected /api/ location blocks.
+    """
+    import re
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    conf_files = [
+        repo_root / "docker" / "nginx_rev_proxy_http_and_https.conf",
+        repo_root / "docker" / "nginx_rev_proxy_http_only.conf",
+    ]
+    directive = re.compile(r'^\s*set\s+\$registry_api_auth\s+""', re.MULTILINE)
+    for conf in conf_files:
+        text = conf.read_text()
+        offenders = [
+            line
+            for line in text.splitlines()
+            if directive.match(line) and not line.lstrip().startswith("#")
+        ]
+        assert not offenders, (
+            f'{conf.name} contains a `set $registry_api_auth ""` default outside '
+            f"the protected /api/ blocks: {offenders}. This re-runs in the /validate "
+            f"subrequest and breaks registry-UI token minting."
+        )
+
+
+def test_registry_api_locations_forward_internal_token():
+    """Every protected registry-API location in the static confs sets the marker
+    and forwards the registry-UI token; the shared /validate block forwards the
+    marker. Guards Phase 4 against a partial wiring that would 401 /api/ calls.
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    conf_files = [
+        repo_root / "docker" / "nginx_rev_proxy_http_and_https.conf",
+        repo_root / "docker" / "nginx_rev_proxy_http_only.conf",
+    ]
+    for conf in conf_files:
+        text = conf.read_text()
+        # The count of protected registry-API locations equals the count of
+        # `auth_request /validate;` directives (only registry-API locations use it).
+        n_protected = text.count("auth_request /validate;")
+        assert n_protected > 0, f"{conf.name}: expected protected /api/ locations"
+        # Marker set + token capture + token forward appear once per protected location.
+        assert text.count('set $registry_api_auth "1";') == n_protected, conf.name
+        assert (
+            text.count(
+                "auth_request_set $auth_internal_token_registry "
+                "$upstream_http_x_internal_token_registry;"
+            )
+            == n_protected
+        ), conf.name
+        assert (
+            text.count("proxy_set_header X-Internal-Token-Registry $auth_internal_token_registry;")
+            == n_protected
+        ), conf.name
+        # The shared /validate block forwards the marker (once per server block).
+        assert "proxy_set_header X-Registry-Api-Auth $registry_api_auth;" in text, conf.name
+
+
+def test_generated_protected_api_block_carries_internal_token():
+    """The generated /api/ block (protected) carries the marker + token forward;
+    the unprotected variant (NGINX_DISABLE_API_AUTH_REQUEST) carries none.
+    """
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[3] / "registry" / "core" / "nginx_service.py"
+    ).read_text()
+    # The protected block string must contain all three directives.
+    assert 'set $registry_api_auth "1";' in src
+    assert (
+        "auth_request_set $auth_internal_token_registry "
+        "$upstream_http_x_internal_token_registry;" in src
+    )
+    assert "proxy_set_header X-Internal-Token-Registry $auth_internal_token_registry;" in src

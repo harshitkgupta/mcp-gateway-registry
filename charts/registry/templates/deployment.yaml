@@ -48,8 +48,11 @@ spec:
               name: http
             - containerPort: 8443
               name: https
-            - containerPort: 7860
-              name: registry
+            # The raw uvicorn app port (7860) is intentionally NOT declared here.
+            # The app binds 127.0.0.1:7860 and is reached only over loopback by the
+            # in-pod nginx; it is not a Service port and probes hit 8080 (nginx).
+            # containerPort is informational, so advertising 7860 would only imply a
+            # pod-reachable raw app port that does not exist. See service.yaml.
             - containerPort: 9464
               name: metrics
           resources:
@@ -128,6 +131,11 @@ spec:
               value: {{ .Values.app.maxCustomRecordsPerType | default 1000 | toString | quote }}
             - name: MAX_CUSTOM_TYPES
               value: {{ .Values.app.maxCustomTypes | default 50 | toString | quote }}
+            # Registry-UI internal token verification (the /api/ hop; minted by auth-server)
+            - name: INTERNAL_TOKEN_TTL_SECONDS
+              value: {{ .Values.app.internalTokenTtlSeconds | default 30 | toString | quote }}
+            - name: INTERNAL_TOKEN_LEEWAY_SECONDS
+              value: {{ .Values.app.internalTokenLeewaySeconds | default 5 | toString | quote }}
             {{- if .Values.awsRegistry.federationEnabled }}
             - name: AWS_REGISTRY_FEDERATION_ENABLED
               value: "true"
