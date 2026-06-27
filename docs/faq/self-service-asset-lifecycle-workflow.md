@@ -1,5 +1,7 @@
 # How do I set up a self-service workflow for AI assets (draft → review → active)?
 
+> **Demo video:** [Watch the end-to-end walkthrough](https://app.vidcast.io/share/1313ea6e-2766-4380-88a6-c5142ee30a33) (read-all user registers a server into draft, admin promotes it to active, and it becomes discoverable in search).
+
 ## Question
 
 I want teams to be able to register their own MCP servers, agents, and skills, but I do not want anything to become live and discoverable until it has been reviewed. Concretely:
